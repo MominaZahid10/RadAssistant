@@ -1,0 +1,51 @@
+# ══════════════════════════════════════════════════════════════
+# RadAssist AI — Git Ignore
+# ══════════════════════════════════════════════════════════════
+
+# ── Environment files (SECRETS!) ──────────────────────────────
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env.local
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+venv/
+env/
+*.whl
+pip-log.txt
+
+# ── Node.js ───────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+npm-debug.log*
+package-lock.json
+
+# ── Docker ────────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── IDE ───────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# ── Project document ─────────────────────────────────────────
+*.docx
+
+# ── Misc ──────────────────────────────────────────────────────
+*.log
+.agents/

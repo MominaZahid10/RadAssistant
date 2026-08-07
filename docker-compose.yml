@@ -1,0 +1,114 @@
+# ══════════════════════════════════════════════════════════════
+# RadAssist AI — Docker Compose (Development)
+# ══════════════════════════════════════════════════════════════
+#
+# WHAT IS DOCKER COMPOSE?
+# A file that defines MULTIPLE Docker containers and how they
+# connect. Instead of running 4 separate commands, you run:
+#   docker-compose up
+# and ALL services start together on a shared network.
+#
+# HOW SERVICES TALK TO EACH OTHER:
+# Docker creates a virtual network. Each service can reach
+# others by NAME. For example, the backend reaches PostgreSQL
+# at hostname "postgres" (not localhost). That's why our
+# DATABASE_URL uses "postgres" as the host.
+#
+# VOLUMES:
+# Volumes persist data. Without them, your database data
+# disappears every time you restart the containers.
+#
+# TO START:  docker-compose up --build
+# TO STOP:   docker-compose down
+# TO RESET:  docker-compose down -v  (WARNING: deletes all data)
+# ══════════════════════════════════════════════════════════════
+
+services:
+
+  # ── PostgreSQL Database ──────────────────────────────────
+  # Stores: users, cases, reports, audit logs (structured data)
+  postgres:
+    image: postgres:16-alpine      # Official Postgres, Alpine = smaller
+    container_name: radassist-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: radassist
+      POSTGRES_PASSWORD: radassist_secret
+      POSTGRES_DB: radassist_db
+    ports:
+      - "5433:5432"                # Access from your machine at localhost:5433 (5432 may be used by local Postgres)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # Persist data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radassist -d radassist_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Qdrant Vector Database ──────────────────────────────
+  # Stores: document embeddings for semantic search (RAG retrieval)
+  # Dashboard: http://localhost:6333/dashboard
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: radassist-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"                # REST API
+      - "6334:6334"                # gRPC (faster, used in production)
+    volumes:
+      - qdrant_data:/qdrant/storage  # Persist vector data
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333' 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── FastAPI Backend ─────────────────────────────────────
+  # The API server — handles all business logic & AI orchestration
+  # Swagger docs: http://localhost:8000/docs
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: radassist-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://radassist:radassist_secret@postgres:5432/radassist_db
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - DEBUG=true
+    volumes:
+      - ./backend:/app             # Mount code for hot reload
+    depends_on:
+      postgres:
+        condition: service_healthy  # Wait for DB to be ready
+      qdrant:
+        condition: service_healthy  # Wait for Qdrant to be ready
+
+  # ── Next.js Frontend ────────────────────────────────────
+  # The web UI — what the radiologist sees and interacts with
+  # Dashboard: http://localhost:3000
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: radassist-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend/src:/app/src    # Mount src for hot reload
+    depends_on:
+      - backend                    # Start after backend is up
+
+# ── Named Volumes ─────────────────────────────────────────
+# These persist data between container restarts.
+# Delete with: docker-compose down -v
+volumes:
+  postgres_data:
+  qdrant_data:

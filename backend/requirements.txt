@@ -1,0 +1,29 @@
+# ══════════════════════════════════════════════════════════════
+# RadAssist AI — Backend Dependencies
+# ══════════════════════════════════════════════════════════════
+# Each package is explained so you understand what it does.
+
+# ── Web Framework ─────────────────────────────────────────────
+fastapi==0.115.0          # The web framework — handles HTTP requests
+uvicorn[standard]==0.30.0 # ASGI server — actually RUNS the FastAPI app
+
+# ── Database (PostgreSQL) ─────────────────────────────────────
+sqlalchemy[asyncio]==2.0.30  # ORM — write Python instead of raw SQL
+asyncpg==0.29.0              # Async PostgreSQL driver (the fastest one)
+alembic==1.13.0              # Database migrations — safely change tables
+
+# ── Configuration ─────────────────────────────────────────────
+pydantic-settings==2.3.0  # Read settings from .env files with validation
+python-dotenv==1.0.1      # Load .env files into environment variables
+
+# ── Vector Database ───────────────────────────────────────────
+qdrant-client==1.10.0     # Client to talk to Qdrant vector database
+
+# ── LLM Providers (will be used in Phase 3+) ─────────────────
+# mistralai             # Uncomment when we reach Phase 3
+# openai                # Uncomment when we reach Phase 3
+
+# ── Document Processing (will be used in Phase 2+) ───────────
+# pymupdf               # PDF parsing
+# python-docx           # DOCX parsing
+# easyocr               # OCR for scanned documents

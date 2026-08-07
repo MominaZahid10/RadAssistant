@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+/*
+ * RadAssist AI — Design System (Clean Chat UI)
+ */
+
+:root {
+  --background: #0b0f1a;
+  --background-secondary: #111827;
+  --surface: #1e293b;
+  --surface-hover: #243049;
+
+  --foreground: #f1f5f9;
+  --foreground-secondary: #94a3b8;
+  --foreground-muted: #64748b;
+
+  --accent: #38bdf8;
+  --accent-hover: #7dd3fc;
+  --accent-subtle: rgba(56, 189, 248, 0.1);
+
+  --success: #34d399;
+  --error: #f87171;
+
+  --border: rgba(148, 163, 184, 0.12);
+  --border-hover: rgba(148, 163, 184, 0.25);
+
+  --sidebar-bg: #0f1629;
+  --sidebar-width: 260px;
+
+  --chat-user: #1e3a5f;
+  --chat-ai: transparent;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-background-secondary: var(--background-secondary);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-foreground: var(--foreground);
+  --color-foreground-secondary: var(--foreground-secondary);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-success: var(--success);
+  --color-error: var(--error);
+  --color-border: var(--border);
+  --color-border-hover: var(--border-hover);
+  --color-sidebar-bg: var(--sidebar-bg);
+  --color-chat-user: var(--chat-user);
+  --color-chat-ai: var(--chat-ai);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--foreground-muted); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--foreground-secondary); }
+
+/* Gradient text */
+.text-gradient {
+  background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Typing indicator animation */
+@keyframes blink {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 1; }
+}
+.dot-1 { animation: blink 1.4s infinite 0s; }
+.dot-2 { animation: blink 1.4s infinite 0.2s; }
+.dot-3 { animation: blink 1.4s infinite 0.4s; }

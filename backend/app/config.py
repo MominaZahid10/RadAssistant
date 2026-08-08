@@ -50,6 +50,57 @@ class Settings(BaseSettings):
     # Which LLM provider to use: "mistral" or "openai"
     LLM_PROVIDER: str = "mistral"
 
+    # ── Embedding Model (Phase 2) ────────────────────────────
+    # The embedding model converts text into vectors (lists of numbers).
+    # These vectors capture the MEANING of text, so similar medical
+    # concepts end up close together in vector space.
+    #
+    # all-MiniLM-L6-v2: Fast, lightweight (80MB), 384 dimensions.
+    # Good for prototyping. Can swap to PubMedBERT (768-dim) later
+    # for better medical accuracy — just change these two values.
+    EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+    EMBEDDING_DIMENSION: int = 384
+    EMBEDDING_BATCH_SIZE: int = 32  # How many chunks to embed at once
+
+    # ── Text Chunking (Phase 2) ──────────────────────────────
+    # Documents are split into small "chunks" before embedding.
+    # WHY? Embedding models have a token limit (~256 tokens for MiniLM).
+    # Smaller chunks also give more precise search results.
+    #
+    # CHUNK_SIZE: Max characters per chunk (~512 chars ≈ 100-130 words)
+    # CHUNK_OVERLAP: Characters shared between consecutive chunks.
+    #   This prevents losing context at chunk boundaries. For example,
+    #   if a finding spans two chunks, the overlap ensures it appears
+    #   fully in at least one of them.
+    CHUNK_SIZE: int = 512
+    CHUNK_OVERLAP: int = 50
+
+    # ── Qdrant Collection (Phase 2) ──────────────────────────
+    # A "collection" in Qdrant is like a table in PostgreSQL —
+    # it holds all vectors for a specific purpose.
+    # We use one collection for all medical knowledge.
+    QDRANT_COLLECTION: str = "radassist_knowledge"
+
+    # ── File Upload Settings (Phase 2) ───────────────────────
+    # Controls what files doctors can upload and how big they can be.
+    MAX_UPLOAD_SIZE_MB: int = 50
+    ALLOWED_EXTENSIONS: list[str] = [
+        ".pdf", ".docx", ".txt", ".md",        # Documents
+        ".png", ".jpg", ".jpeg", ".tiff", ".bmp",  # Images (OCR)
+    ]
+    # Where uploaded files are temporarily saved during processing
+    UPLOAD_DIR: str = "/app/uploads"
+
+    # ── NCBI / PubMed API (Phase 2) ──────────────────────────
+    # Used to fetch medical articles from StatPearls and PubMed.
+    # StatPearls is a peer-reviewed medical knowledge base on NCBI —
+    # freely accessible, regularly updated, used by clinicians worldwide.
+    #
+    # Get a free API key at: https://www.ncbi.nlm.nih.gov/account/
+    # Without a key: 3 requests/sec. With key: 10 requests/sec.
+    NCBI_API_KEY: str = ""
+    NCBI_EMAIL: str = ""  # NCBI requires an email for API access
+
     # ── CORS (Cross-Origin Resource Sharing) ──────────────────
     # Allows the frontend (port 3000) to call the backend (port 8000).
     # Without this, the browser blocks the requests for security.

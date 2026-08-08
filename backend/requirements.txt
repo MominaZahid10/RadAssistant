@@ -23,7 +23,20 @@ qdrant-client==1.10.0     # Client to talk to Qdrant vector database
 # mistralai             # Uncomment when we reach Phase 3
 # openai                # Uncomment when we reach Phase 3
 
-# ── Document Processing (will be used in Phase 2+) ───────────
-# pymupdf               # PDF parsing
-# python-docx           # DOCX parsing
-# easyocr               # OCR for scanned documents
+# ── Document Processing (Phase 2) ────────────────────────────
+pymupdf==1.24.0           # PDF text extraction — fastest Python PDF lib (C-based MuPDF engine)
+python-docx==1.1.0        # DOCX (Word) text extraction
+Pillow==10.4.0            # Image handling — open, resize, convert image formats
+pytesseract==0.3.13       # OCR — extract text from images (uses Tesseract engine)
+
+# ── Embeddings (Phase 2) ─────────────────────────────────────
+sentence-transformers==3.0.1  # Load & run embedding models (all-MiniLM-L6-v2)
+                              # Automatically installs torch, transformers, etc.
+
+# ── File Upload Support ──────────────────────────────────────
+python-multipart==0.0.9   # Required by FastAPI to accept file uploads (multipart/form-data)
+aiofiles==24.1.0          # Async file I/O — needed for saving uploaded files efficiently
+
+# ── Medical Knowledge Sources (Phase 2) ──────────────────────
+biopython==1.84           # Access NCBI/PubMed APIs (E-utilities) — fetch StatPearls articles
+httpx==0.27.0             # Modern async HTTP client — for fetching external medical content

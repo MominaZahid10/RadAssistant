@@ -1,8 +1,15 @@
-# Business logic / services package
+# ══════════════════════════════════════════════════════════════
+# Business Logic / Services Package
+# ══════════════════════════════════════════════════════════════
 # Services contain the actual logic (not just routing).
-# Example: ReportService.generate() would:
-#   1. Retrieve context from Qdrant
-#   2. Build a prompt
-#   3. Call the LLM
-#   4. Format the response
-# This separation keeps endpoints thin and logic testable.
+# Each service handles one responsibility:
+#
+# Phase 2:
+#   embedding.py     → Load & run the embedding model
+#   qdrant_service.py → Manage vector storage in Qdrant
+#   ingestion.py     → Full document processing pipeline
+#
+# Future Phases:
+#   report_service.py → Report generation (Phase 3)
+#   llm_service.py    → LLM integration (Phase 3)
+#   chat_service.py   → AI assistant (Phase 3+)

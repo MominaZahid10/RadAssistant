@@ -1,5 +1,22 @@
-# Pydantic schemas package
+# ══════════════════════════════════════════════════════════════
+# Pydantic Schemas Package
+# ══════════════════════════════════════════════════════════════
 # Schemas define the SHAPE of API requests and responses.
 # Unlike models (which map to DB tables), schemas map to JSON.
-# Example: ReportCreateSchema defines what the frontend sends
-#          when requesting a new report.
+#
+# Import all schemas here so endpoints can do:
+#   from app.schemas import DocumentResponse, SearchRequest
+# instead of:
+#   from app.schemas.document import DocumentResponse
+
+from app.schemas.document import (  # noqa: F401
+    DocumentResponse,
+    DocumentListResponse,
+    DocumentUploadResponse,
+    ChunkPreview,
+    ChunkListResponse,
+    SearchRequest,
+    SearchResult,
+    SearchResponse,
+    KnowledgeBaseStats,
+)

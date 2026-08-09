@@ -14,8 +14,29 @@ HOW IT WORKS:
 - Type validation happens automatically (e.g., int stays int)
 """
 
-from pydantic_settings import BaseSettings
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+
+
+def _split_csv(raw: str) -> list[str]:
+    """
+    Parse a comma-separated (or JSON-array) env var into a list of strings.
+
+    Accepts both forms so neither is a footgun:
+        CORS_ORIGINS=http://a.com,http://b.com
+        CORS_ORIGINS=["http://a.com","http://b.com"]
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    if raw.startswith("["):
+        import json
+        try:
+            return [str(x).strip() for x in json.loads(raw)]
+        except (ValueError, TypeError):
+            pass  # Malformed JSON — fall through to comma parsing
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 class Settings(BaseSettings):
@@ -84,10 +105,19 @@ class Settings(BaseSettings):
     # ── File Upload Settings (Phase 2) ───────────────────────
     # Controls what files doctors can upload and how big they can be.
     MAX_UPLOAD_SIZE_MB: int = 50
-    ALLOWED_EXTENSIONS: list[str] = [
-        ".pdf", ".docx", ".txt", ".md",        # Documents
-        ".png", ".jpg", ".jpeg", ".tiff", ".bmp",  # Images (OCR)
-    ]
+
+    # ⚠️  DECLARED AS str, NOT list[str] — ON PURPOSE.
+    # pydantic-settings runs json.loads() on any "complex" field type
+    # (list/dict/set) inside its *env source*, which happens BEFORE any
+    # field_validator gets a chance to run. So a plain value like
+    #     ALLOWED_EXTENSIONS=pdf,docx
+    # crashes the app at startup with a JSONDecodeError, and no validator
+    # can rescue it. Keeping the field a str sidesteps the decoder entirely;
+    # the parsed list is exposed via the property below.
+    ALLOWED_EXTENSIONS_RAW: str = Field(
+        default=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.tiff,.bmp",
+        alias="ALLOWED_EXTENSIONS",
+    )
     # Where uploaded files are temporarily saved during processing
     UPLOAD_DIR: str = "/app/uploads"
 
@@ -104,17 +134,43 @@ class Settings(BaseSettings):
     # ── CORS (Cross-Origin Resource Sharing) ──────────────────
     # Allows the frontend (port 3000) to call the backend (port 8000).
     # Without this, the browser blocks the requests for security.
-    CORS_ORIGINS: list[str] = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ]
+    # Same str-not-list treatment as ALLOWED_EXTENSIONS above.
+    CORS_ORIGINS_RAW: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000",
+        alias="CORS_ORIGINS",
+    )
 
-    class Config:
-        # Tell Pydantic to read from this file
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        # Make field names case-insensitive
-        case_sensitive = False
+    # ── Parsed views ─────────────────────────────────────────
+    # These keep every call site unchanged: code still reads
+    # settings.CORS_ORIGINS and settings.ALLOWED_EXTENSIONS and gets a list.
+
+    @property
+    def CORS_ORIGINS(self) -> list[str]:
+        """Origins allowed to call this API, parsed from the raw env value."""
+        return _split_csv(self.CORS_ORIGINS_RAW)
+
+    @property
+    def ALLOWED_EXTENSIONS(self) -> list[str]:
+        """
+        Uploadable file extensions, normalised to lowercase with a leading dot.
+        Accepts 'pdf', '.pdf', or 'PDF' in config and yields '.pdf'.
+        """
+        return [
+            ext.lower() if ext.startswith(".") else f".{ext.lower()}"
+            for ext in _split_csv(self.ALLOWED_EXTENSIONS_RAW)
+        ]
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        # Allow setting fields by their alias (ALLOWED_EXTENSIONS) as well as
+        # by their Python name (ALLOWED_EXTENSIONS_RAW).
+        populate_by_name=True,
+        # Ignore unrelated variables that Docker/the OS injects into the
+        # environment, instead of crashing on them.
+        extra="ignore",
+    )
 
 
 @lru_cache()

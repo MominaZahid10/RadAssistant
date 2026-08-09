@@ -20,9 +20,15 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # ── Install system dependencies ──────────────────────────────
-# Some Python packages need C libraries to compile
+# build-essential: some Python packages need C libraries to compile
+# tesseract-ocr:   the actual OCR ENGINE. `pytesseract` in requirements.txt
+#                  is only a thin Python wrapper — it shells out to this
+#                  binary. Without it, every image upload fails at runtime.
+# tesseract-ocr-eng: the English language training data
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install Python dependencies ──────────────────────────────
@@ -41,5 +47,8 @@ EXPOSE 8000
 # ── Start the server ─────────────────────────────────────────
 # --host 0.0.0.0: Listen on all interfaces (required in Docker)
 # --port 8000: The port number
-# --reload: Auto-restart when code changes (dev mode only)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+#
+# NOTE: --reload is deliberately NOT here. It's a development-only flag,
+# and baking it into the image makes the image undeployable. docker-compose
+# adds it back via a `command:` override for local dev.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

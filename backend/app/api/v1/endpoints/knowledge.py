@@ -20,12 +20,13 @@ FastAPI automatically:
 4. Handles errors with clear messages
 
 ENDPOINT OVERVIEW:
-    POST   /api/v1/knowledge/upload              Upload a file
-    GET    /api/v1/knowledge/documents            List all documents
-    GET    /api/v1/knowledge/documents/{id}       Get one document's details
-    DELETE /api/v1/knowledge/documents/{id}       Delete a document
+    POST   /api/v1/knowledge/upload                Upload a file (async)
+    GET    /api/v1/knowledge/documents             List all documents
+    GET    /api/v1/knowledge/documents/{id}        Get one document's details
+    DELETE /api/v1/knowledge/documents/{id}        Delete a document
     GET    /api/v1/knowledge/documents/{id}/chunks Preview chunks
-    POST   /api/v1/knowledge/search               Semantic search
+    POST   /api/v1/knowledge/search                Semantic search
+    POST   /api/v1/knowledge/seed                  Load curated radiology content
     GET    /api/v1/knowledge/stats                 Knowledge base statistics
 """
 
@@ -33,12 +34,21 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    UploadFile,
+    File,
+    Form,
+    HTTPException,
+    status,
+    Depends,
+)
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.database import get_db
+from app.core.database import get_db, async_session
 from app.models.document import Document
 from app.schemas.document import (
     DocumentResponse,
@@ -51,14 +61,75 @@ from app.schemas.document import (
     SearchResult,
     KnowledgeBaseStats,
 )
-from app.services.ingestion import ingest_document, ingest_text_content
+from app.data.seed_knowledge import SEED_KNOWLEDGE
+from app.services.ingestion import ingest_document
 from app.services.embedding import embedding_service
+from app.services.knowledge_seeder import seed_knowledge_base
 from app.services.qdrant_service import qdrant_service
 
 settings = get_settings()
 
 # Create the router — all endpoints here get the /knowledge prefix
 router = APIRouter(prefix="/knowledge", tags=["Knowledge Base"])
+
+
+# ══════════════════════════════════════════════════════════════
+# BACKGROUND WORKER
+# ══════════════════════════════════════════════════════════════
+
+
+async def _process_upload_in_background(
+    file_bytes: bytes,
+    filename: str,
+    file_type: str,
+    document_id: uuid.UUID,
+    source_type: str,
+    title: str | None,
+) -> None:
+    """
+    Run the ingestion pipeline after the HTTP response has been sent.
+
+    ⚠️  WHY ITS OWN DB SESSION?
+    The session injected into the endpoint via Depends(get_db) is closed as
+    soon as the response is returned. A background task that tried to reuse
+    it would fail with "session is closed". So we open a fresh one here and
+    own its full lifecycle.
+
+    This function must never raise: an unhandled exception in a background
+    task is swallowed by Starlette, which would leave the document stuck at
+    status="processing" forever with no explanation. Everything is caught
+    and written back to the row.
+    """
+    async with async_session() as db:
+        try:
+            result = await ingest_document(
+                file_bytes=file_bytes,
+                filename=filename,
+                file_type=file_type,
+                document_id=str(document_id),
+                source_type=source_type,
+                title=title,
+            )
+            new_status = result["status"]
+            chunk_count = result["chunk_count"]
+            error_message = result["message"] if new_status == "failed" else None
+        except Exception as e:  # noqa: BLE001 — last line of defence
+            new_status = "failed"
+            chunk_count = 0
+            error_message = f"Unhandled error during ingestion: {e}"
+
+        # Write the outcome back so GET /documents/{id} reflects reality.
+        try:
+            doc = await db.get(Document, document_id)
+            if doc is not None:
+                doc.status = new_status
+                doc.chunk_count = chunk_count
+                doc.error_message = error_message
+                doc.updated_at = datetime.now(timezone.utc)
+                await db.commit()
+        except Exception as e:  # noqa: BLE001
+            await db.rollback()
+            print(f"❌ Could not record ingestion result for {document_id}: {e}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -72,12 +143,16 @@ router = APIRouter(prefix="/knowledge", tags=["Knowledge Base"])
     status_code=status.HTTP_201_CREATED,
     summary="Upload a document to the knowledge base",
     description=(
-        "Upload a PDF, DOCX, TXT, or image file. The file will be parsed, "
-        "chunked, embedded, and stored in the vector database for semantic search. "
+        "Upload a PDF, DOCX, TXT, or image file. The file is parsed, chunked, "
+        "embedded, and stored in the vector database for semantic search.\n\n"
+        "This returns immediately with status='processing'. Poll "
+        "`GET /knowledge/documents/{id}` until status becomes 'completed' or "
+        "'failed'.\n\n"
         "Supported formats: PDF, DOCX, TXT, MD, PNG, JPG, JPEG, TIFF, BMP."
     ),
 )
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(
         ...,
         description="The document file to upload"
@@ -97,17 +172,21 @@ async def upload_document(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Upload a document and process it through the ingestion pipeline.
-    
+    Upload a document and queue it for ingestion.
+
     FLOW:
-    1. Validate file type and size
-    2. Create a document record in PostgreSQL (status: "processing")
-    3. Run the ingestion pipeline (parse → chunk → embed → store)
-    4. Update the document status to "completed" or "failed"
-    5. Return the document ID and status
-    
-    The frontend can then use the document ID to check status,
-    view chunks, or delete the document.
+    1. Validate file type and size (synchronous — fail fast on bad input)
+    2. Create a document record in PostgreSQL with status="processing"
+    3. Return 201 immediately
+    4. AFTER the response is sent, the ingestion pipeline runs in the
+       background and updates the row to "completed" or "failed"
+
+    WHY NOT DO THE WORK INLINE?
+    Embedding a large PDF takes minutes of CPU. Holding the HTTP connection
+    open that long causes client/proxy timeouts, and it makes the status
+    column pointless — you'd only ever see the final state.
+
+    The frontend polls GET /knowledge/documents/{id} to track progress.
     """
     # ── Validate file extension ─────────────────────────────
     if not file.filename:
@@ -161,32 +240,27 @@ async def upload_document(
     db.add(doc)
     await db.commit()
     await db.refresh(doc)
-    
-    # ── Run the ingestion pipeline ──────────────────────────
-    result = await ingest_document(
+
+    # ── Queue the ingestion pipeline ────────────────────────
+    # Starlette runs this after the response is sent.
+    background_tasks.add_task(
+        _process_upload_in_background,
         file_bytes=file_bytes,
         filename=file.filename,
         file_type=file_ext.lstrip("."),
-        document_id=str(doc.id),
+        document_id=doc.id,
         source_type=source_type,
         title=title,
     )
-    
-    # ── Update document status in PostgreSQL ────────────────
-    doc.status = result["status"]
-    doc.chunk_count = result["chunk_count"]
-    if result["status"] == "failed":
-        doc.error_message = result["message"]
-    doc.updated_at = datetime.now(timezone.utc)
-    
-    await db.commit()
-    await db.refresh(doc)
-    
+
     return DocumentUploadResponse(
         id=doc.id,
         filename=doc.filename,
-        status=doc.status,
-        message=result["message"],
+        status=doc.status,  # "processing"
+        message=(
+            f"'{file.filename}' accepted and queued for processing. "
+            f"Poll GET /api/v1/knowledge/documents/{doc.id} for status."
+        ),
     )
 
 
@@ -431,6 +505,56 @@ async def search_knowledge(request: SearchRequest):
         ],
         total_results=len(results),
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# SEED — Populate the knowledge base with curated content
+# ══════════════════════════════════════════════════════════════
+
+
+@router.post(
+    "/seed",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Seed the knowledge base with curated radiology content",
+    description=(
+        "Ingests the built-in curated radiology knowledge (14 articles covering "
+        "chest X-ray interpretation, pneumonia, pneumothorax, PE, stroke, trauma, "
+        "contrast safety, and structured reporting).\n\n"
+        "If `NCBI_EMAIL` is configured in the environment, it also fetches "
+        "StatPearls abstracts from the NCBI E-utilities API.\n\n"
+        "**Idempotent** — articles already present are skipped, so running this "
+        "twice will not create duplicates.\n\n"
+        "Runs in the background; returns immediately. Watch the server logs or "
+        "poll `GET /knowledge/stats` to see documents appear."
+    ),
+)
+async def seed_knowledge(background_tasks: BackgroundTasks):
+    """
+    Trigger knowledge base seeding.
+
+    WHY MANUAL RATHER THAN ON STARTUP?
+    Seeding embeds ~14 articles, which takes 10-30 seconds. Doing that on every
+    container start makes restarts slow and unpredictable, and it fights with
+    Docker healthchecks. An explicit endpoint means seeding happens when you
+    decide it should.
+    """
+    async def _run_seed() -> None:
+        # Fresh session — the request-scoped one is closed by now.
+        async with async_session() as db:
+            try:
+                await seed_knowledge_base(db)
+            except Exception as e:  # noqa: BLE001
+                await db.rollback()
+                print(f"❌ Knowledge base seeding failed: {e}")
+
+    background_tasks.add_task(_run_seed)
+
+    return {
+        "message": "Knowledge base seeding started in the background.",
+        "curated_articles": len(SEED_KNOWLEDGE),
+        "ncbi_fetch_enabled": bool(settings.NCBI_EMAIL),
+        "next_step": "Poll GET /api/v1/knowledge/stats to watch documents appear.",
+    }
 
 
 # ══════════════════════════════════════════════════════════════

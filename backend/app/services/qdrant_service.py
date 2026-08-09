@@ -39,6 +39,12 @@ from app.config import get_settings
 
 settings = get_settings()
 
+# How many points to pull per scroll round-trip when reading a whole document.
+_SCROLL_BATCH_SIZE = 256
+
+# Guard against pathological documents when previewing chunks.
+_MAX_CHUNKS_PER_DOCUMENT = 20_000
+
 
 class QdrantService:
     """
@@ -98,6 +104,7 @@ class QdrantService:
                     )
                 else:
                     print(f"✅ Qdrant collection '{self.collection_name}' verified ({existing_dim}D)")
+                self._ensure_payload_indexes()
                 return
 
             # Create new collection
@@ -109,10 +116,40 @@ class QdrantService:
                 ),
             )
             print(f"✅ Created Qdrant collection: '{self.collection_name}' ({self.dimension}D, COSINE)")
+            self._ensure_payload_indexes()
 
         except Exception as e:
             print(f"❌ Failed to initialize Qdrant collection: {e}")
             raise
+
+    def _ensure_payload_indexes(self) -> None:
+        """
+        Create payload indexes on the fields we filter by.
+
+        WHY THIS MATTERS:
+        Qdrant's HNSW index makes *vector* search fast, but filtering on a
+        payload field without an index forces a full scan of the collection.
+        We filter on `document_id` (every delete and every chunk preview) and
+        `source_type` (filtered search), so both need indexes.
+
+        At 1,000 vectors you won't notice. At 500,000 — a realistic size once
+        real textbooks are ingested — an unindexed delete goes from
+        milliseconds to seconds.
+
+        Idempotent: re-creating an existing index is a no-op on the server,
+        and any error here is non-fatal (search still works, just slower).
+        """
+        for field in ("document_id", "source_type"):
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field,
+                    field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+                )
+                print(f"   ↳ payload index ensured on '{field}'")
+            except Exception as e:
+                # Already exists, or the server is an older version — not fatal.
+                print(f"   ↳ payload index on '{field}' skipped ({type(e).__name__})")
 
     def upsert_chunks(
         self,
@@ -229,13 +266,17 @@ class QdrantService:
                 ]
             )
 
-        # Execute the search
-        results = self.client.search(
+        # Execute the search.
+        # NOTE: client.search() is deprecated in qdrant-client >= 1.10 in
+        # favour of query_points(). Same semantics; results live under
+        # `.points` instead of being returned directly.
+        response = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=query_filter,
             limit=limit,
             score_threshold=score_threshold,
+            with_payload=True,
         )
 
         # Convert Qdrant results to clean dicts
@@ -248,7 +289,7 @@ class QdrantService:
                 "source_type": hit.payload.get("source_type"),
                 "chunk_index": hit.payload.get("chunk_index"),
             }
-            for hit in results
+            for hit in response.points
         ]
 
     def delete_by_document(self, document_id: str) -> bool:
@@ -293,10 +334,17 @@ class QdrantService:
         """
         try:
             info = self.client.get_collection(self.collection_name)
+
+            # NOTE: `vectors_count` is None on recent Qdrant servers — it was
+            # deprecated because it's ambiguous for multi-vector collections.
+            # `points_count` is the reliable field, and since we store exactly
+            # one vector per point, they're equivalent for us.
+            points_count = info.points_count or 0
+
             return {
                 "collection_name": self.collection_name,
-                "vectors_count": info.vectors_count,
-                "points_count": info.points_count,
+                "vectors_count": info.vectors_count if info.vectors_count is not None else points_count,
+                "points_count": points_count,
                 "dimension": self.dimension,
                 "status": str(info.status),
             }
@@ -327,34 +375,67 @@ class QdrantService:
         Used by the chunk preview endpoint — lets developers/admins
         inspect how a document was split, to verify ingestion quality.
         
+        ⚠️  WHY WE DON'T PASS `offset` TO scroll():
+        Qdrant's scroll `offset` parameter is a POINT ID to resume from — it is
+        NOT a "skip N rows" counter like SQL's OFFSET. Passing an integer there
+        makes Qdrant look for a point whose ID is that integer, which silently
+        returns the wrong page (or nothing).
+
+        Scroll also returns points in ID order, which is random for us because
+        chunk IDs are UUIDs. So page 2 wouldn't even contain the chunks that
+        logically follow page 1.
+
+        Correct approach: pull every chunk for this one document, sort by
+        chunk_index, then slice in Python. A single document's chunk count is
+        bounded (hundreds, not millions), so this is cheap and always correct.
+
         Args:
             document_id: The UUID of the document
             limit: Max chunks to return (pagination)
-            offset: Skip this many chunks (pagination)
-            
+            offset: How many chunks to skip (pagination)
+
         Returns:
             List of dicts with: text, chunk_index, char_count
         """
+        doc_filter = qdrant_models.Filter(
+            must=[
+                qdrant_models.FieldCondition(
+                    key="document_id",
+                    match=qdrant_models.MatchValue(value=str(document_id)),
+                )
+            ]
+        )
+
         try:
-            # Use scroll to get points by filter (not by vector similarity)
-            results, _next_offset = self.client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter=qdrant_models.Filter(
-                    must=[
-                        qdrant_models.FieldCondition(
-                            key="document_id",
-                            match=qdrant_models.MatchValue(value=str(document_id)),
-                        )
-                    ]
-                ),
-                limit=limit,
-                offset=offset,
-                with_payload=True,
-                with_vectors=False,  # Don't return vectors — just text/metadata
-            )
+            all_points = []
+            next_page = None  # Qdrant's real cursor: a point ID, or None to start
+
+            while True:
+                points, next_page = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=doc_filter,
+                    limit=_SCROLL_BATCH_SIZE,
+                    offset=next_page,
+                    with_payload=True,
+                    with_vectors=False,  # Don't return vectors — just text/metadata
+                )
+                all_points.extend(points)
+
+                # next_page is None once we've seen every matching point.
+                if next_page is None:
+                    break
+
+                # Safety valve: a single document should never have this many
+                # chunks. If it does, something upstream is wrong.
+                if len(all_points) >= _MAX_CHUNKS_PER_DOCUMENT:
+                    print(
+                        f"⚠️  Document {document_id} has more than "
+                        f"{_MAX_CHUNKS_PER_DOCUMENT} chunks — truncating preview."
+                    )
+                    break
 
             chunks = []
-            for point in results:
+            for point in all_points:
                 text = point.payload.get("text", "")
                 chunks.append({
                     "chunk_index": point.payload.get("chunk_index", 0),
@@ -362,9 +443,11 @@ class QdrantService:
                     "char_count": len(text),
                 })
 
-            # Sort by chunk_index so they appear in document order
+            # Sort by chunk_index so they appear in document order, THEN
+            # paginate. Sorting after slicing (the old bug) only orders
+            # within a page.
             chunks.sort(key=lambda c: c["chunk_index"])
-            return chunks
+            return chunks[offset : offset + limit]
 
         except Exception as e:
             print(f"❌ Failed to get chunks for document {document_id}: {e}")

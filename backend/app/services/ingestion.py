@@ -53,10 +53,12 @@ STAGE 4 — STORE:
   Saves vectors + text to Qdrant, updates PostgreSQL document status.
 """
 
-import os
 import io
+import traceback
+
 import fitz  # PyMuPDF — imported as 'fitz' (historical name)
 from docx import Document as DocxDocument
+from fastapi.concurrency import run_in_threadpool
 from PIL import Image
 
 from app.config import get_settings
@@ -65,6 +67,24 @@ from app.services.qdrant_service import qdrant_service
 
 settings = get_settings()
 
+# Below this many characters, a "successful" parse isn't worth embedding.
+# Set high enough that error placeholders and stray page numbers can't
+# masquerade as real content.
+MIN_USABLE_TEXT_CHARS = 50
+
+
+class ParseError(Exception):
+    """
+    Raised when a file cannot be turned into usable text.
+
+    WHY A CUSTOM EXCEPTION?
+    So the pipeline can distinguish "this file is bad" (a user problem we
+    should report clearly) from "our code crashed" (a bug we should see).
+    Returning an error *string* instead of raising is how bad data ends up
+    embedded in the vector store — see parse_image() for the war story.
+    """
+    pass
+
 
 # ══════════════════════════════════════════════════════════════
 # STAGE 1 — DOCUMENT PARSING
@@ -72,6 +92,9 @@ settings = get_settings()
 # Each parser extracts raw text from a specific file format.
 # They all return a plain string — the rest of the pipeline
 # doesn't care what format the original file was.
+#
+# CONTRACT: a parser either returns usable text, or raises ParseError.
+# It never returns a placeholder / error message as if it were content.
 # ══════════════════════════════════════════════════════════════
 
 
@@ -97,17 +120,27 @@ def parse_pdf(file_bytes: bytes) -> str:
         Extracted text as a single string
     """
     text_parts = []
-    
-    # fitz.open() can read from bytes via a stream — no temp file needed
-    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
-        for page_num, page in enumerate(doc):
-            # get_text("text") extracts plain text in reading order
-            # "blocks" mode would give us more structure, but plain
-            # text is sufficient for chunking and embedding
-            page_text = page.get_text("text")
-            if page_text.strip():
-                text_parts.append(page_text)
-    
+
+    try:
+        # fitz.open() can read from bytes via a stream — no temp file needed
+        with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+            for page in doc:
+                # get_text("text") extracts plain text in reading order
+                # "blocks" mode would give us more structure, but plain
+                # text is sufficient for chunking and embedding
+                page_text = page.get_text("text")
+                if page_text.strip():
+                    text_parts.append(page_text)
+    except Exception as e:
+        raise ParseError(f"Could not read this PDF: {e}") from e
+
+    if not text_parts:
+        raise ParseError(
+            "This PDF contains no extractable text. It is most likely a "
+            "scanned document — every page is an image. Convert it to PNG/TIFF "
+            "and upload it as an image so it goes through OCR instead."
+        )
+
     return "\n\n".join(text_parts)
 
 
@@ -130,14 +163,28 @@ def parse_docx(file_bytes: bytes) -> str:
     Returns:
         Extracted text as a single string
     """
-    doc = DocxDocument(io.BytesIO(file_bytes))
-    
+    try:
+        doc = DocxDocument(io.BytesIO(file_bytes))
+    except Exception as e:
+        raise ParseError(f"Could not read this DOCX file: {e}") from e
+
     paragraphs = []
     for para in doc.paragraphs:
         text = para.text.strip()
         if text:
             paragraphs.append(text)
-    
+
+    # Tables are common in clinical documents (protocols, dose charts)
+    # and live outside doc.paragraphs — they'd be silently dropped otherwise.
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            if cells:
+                paragraphs.append(" | ".join(cells))
+
+    if not paragraphs:
+        raise ParseError("This DOCX file contains no readable text.")
+
     return "\n\n".join(paragraphs)
 
 
@@ -177,36 +224,65 @@ def parse_image(file_bytes: bytes) -> str:
     3. Tesseract recognizes text patterns and returns a string
     
     REQUIREMENTS:
-    - Tesseract must be installed in the Docker container
+    - Tesseract must be installed in the Docker container (see Dockerfile)
     - For best results, images should be clear and well-lit
     - Handwriting recognition is basic — works best with printed text
-    
+
+    ⚠️  WHY THIS RAISES INSTEAD OF RETURNING AN ERROR STRING:
+    An earlier version returned "[OCR failed: ...]" on error. That string is
+    longer than the minimum-length check downstream, so it sailed through the
+    pipeline, got embedded into a vector, and was stored in Qdrant while the
+    document was marked "completed". The knowledge base silently filled with
+    garbage that would later surface as RAG search results.
+
+    A failed parse must FAIL. ingest_document() catches the exception and
+    records status="failed" with the real reason, which is what the status
+    column exists for.
+
     Args:
         file_bytes: Raw bytes of the image file (PNG, JPG, TIFF, etc.)
-        
+
     Returns:
         Extracted text from the image
+
+    Raises:
+        ParseError: If Tesseract is missing, the image is unreadable, or
+                    OCR produces no usable text.
     """
     try:
         import pytesseract
-        
+    except ImportError as e:
+        raise ParseError(
+            "pytesseract is not installed. Add it to requirements.txt."
+        ) from e
+
+    try:
         image = Image.open(io.BytesIO(file_bytes))
-        
+
         # Convert to RGB if necessary (some formats like PNG have alpha channel)
         if image.mode != "RGB":
             image = image.convert("RGB")
-        
-        # Run OCR — pytesseract sends the image to the Tesseract engine
-        # and returns the recognized text
+
+        # Run OCR — pytesseract shells out to the Tesseract binary
         text = pytesseract.image_to_string(image)
-        return text.strip()
-        
-    except ImportError:
-        print("⚠️  pytesseract not available — OCR disabled")
-        return "[OCR not available — install tesseract to extract text from images]"
+
+    except pytesseract.TesseractNotFoundError as e:
+        raise ParseError(
+            "The Tesseract OCR engine is not installed in this container. "
+            "Install it with: apt-get install -y tesseract-ocr tesseract-ocr-eng"
+        ) from e
     except Exception as e:
-        print(f"⚠️  OCR failed: {e}")
-        return f"[OCR failed: {str(e)}]"
+        raise ParseError(f"OCR failed on this image: {e}") from e
+
+    text = text.strip()
+    if not text:
+        raise ParseError(
+            "OCR ran successfully but found no readable text in this image. "
+            "The image may be blank, too low-resolution, or contain only "
+            "graphics with no text."
+        )
+
+    return text
 
 
 def parse_file(file_bytes: bytes, file_type: str) -> str:
@@ -241,11 +317,11 @@ def parse_file(file_bytes: bytes, file_type: str) -> str:
     
     parser = parsers.get(file_type.lower())
     if not parser:
-        raise ValueError(
+        raise ParseError(
             f"Unsupported file type: '{file_type}'. "
             f"Supported: {', '.join(parsers.keys())}"
         )
-    
+
     return parser(file_bytes)
 
 
@@ -287,9 +363,28 @@ def chunk_text(
     Returns:
         List of text chunks, each at most chunk_size characters
     """
-    chunk_size = chunk_size or settings.CHUNK_SIZE
-    chunk_overlap = chunk_overlap or settings.CHUNK_OVERLAP
-    
+    # ⚠️  `is None`, NOT `or` — 0 is a falsy but MEANINGFUL value here.
+    # `chunk_overlap or settings.CHUNK_OVERLAP` silently rewrites an explicit
+    # chunk_overlap=0 (a legitimate "no overlap" request) into the configured
+    # default, so overlap could never be disabled. The same bug let
+    # chunk_size=0 fall through to 512 and skip the validation below.
+    chunk_size = settings.CHUNK_SIZE if chunk_size is None else chunk_size
+    chunk_overlap = settings.CHUNK_OVERLAP if chunk_overlap is None else chunk_overlap
+
+    # ── Guard against a config that can't terminate ──────────
+    # The character-level fallback below steps by (chunk_size - chunk_overlap).
+    # If overlap >= size, that step is 0 or negative → range() either yields
+    # nothing or loops forever. Fail loudly at the call site instead.
+    if chunk_size <= 0:
+        raise ValueError(f"CHUNK_SIZE must be positive, got {chunk_size}")
+    if chunk_overlap < 0:
+        raise ValueError(f"CHUNK_OVERLAP cannot be negative, got {chunk_overlap}")
+    if chunk_overlap >= chunk_size:
+        raise ValueError(
+            f"CHUNK_OVERLAP ({chunk_overlap}) must be smaller than "
+            f"CHUNK_SIZE ({chunk_size}), otherwise chunking cannot advance."
+        )
+
     # Clean the text — normalize whitespace, remove excessive blank lines
     text = text.strip()
     if not text:
@@ -423,85 +518,56 @@ async def ingest_document(
             "message": "Successfully processed 45 chunks"
         }
     """
+    # ── STAGE 1: Parse ──────────────────────────────────────
+    # Parsing is CPU-bound (PyMuPDF, Tesseract) so it runs in a worker
+    # thread, not on the event loop. See _embed_and_store for why.
     try:
-        # ── STAGE 1: Parse ──────────────────────────────────
         print(f"📄 Parsing {filename} ({file_type})...")
-        raw_text = parse_file(file_bytes, file_type)
-        
-        if not raw_text or len(raw_text.strip()) < 10:
-            return {
-                "status": "failed",
-                "chunk_count": 0,
-                "char_count": 0,
-                "message": "No meaningful text could be extracted from the file."
-            }
-        
-        print(f"   → Extracted {len(raw_text)} characters")
-        
-        # ── STAGE 2: Chunk ──────────────────────────────────
-        print(f"✂️  Chunking text (size={settings.CHUNK_SIZE}, overlap={settings.CHUNK_OVERLAP})...")
-        chunks = chunk_text(raw_text)
-        
-        if not chunks:
-            return {
-                "status": "failed",
-                "chunk_count": 0,
-                "char_count": len(raw_text),
-                "message": "Text was extracted but no valid chunks were produced."
-            }
-        
-        print(f"   → Created {len(chunks)} chunks")
-        
-        # ── STAGE 3: Embed ──────────────────────────────────
-        print(f"🧠 Embedding {len(chunks)} chunks...")
-        vectors = embedding_service.encode(
-            chunks,
-            batch_size=settings.EMBEDDING_BATCH_SIZE,
-            show_progress=len(chunks) > 50,  # Show progress bar for large docs
-        )
-        print(f"   → Generated {len(vectors)} vectors ({settings.EMBEDDING_DIMENSION}D each)")
-        
-        # ── STAGE 4: Store in Qdrant ────────────────────────
-        print(f"💾 Storing in Qdrant collection '{settings.QDRANT_COLLECTION}'...")
-        
-        # Metadata attached to each vector — used for filtering and display
-        metadata = {
-            "filename": filename,
-            "source_type": source_type,
-        }
-        if title:
-            metadata["title"] = title
-        
-        # Delete any existing chunks for this document (re-ingestion safe)
-        qdrant_service.delete_by_document(document_id)
-        
-        # Insert new chunks
-        upserted = qdrant_service.upsert_chunks(
-            document_id=document_id,
-            chunks=chunks,
-            vectors=vectors,
-            metadata=metadata,
-        )
-        
-        print(f"   → Stored {upserted} vectors in Qdrant")
-        print(f"✅ Successfully ingested: {filename}")
-        
-        return {
-            "status": "completed",
-            "chunk_count": len(chunks),
-            "char_count": len(raw_text),
-            "message": f"Successfully processed {len(chunks)} chunks from {filename}"
-        }
-        
-    except Exception as e:
-        error_msg = f"Ingestion failed for {filename}: {str(e)}"
-        print(f"❌ {error_msg}")
+        raw_text = await run_in_threadpool(parse_file, file_bytes, file_type)
+    except ParseError as e:
+        # Expected, user-facing failure — report it cleanly.
+        print(f"❌ Parse failed for {filename}: {e}")
         return {
             "status": "failed",
             "chunk_count": 0,
             "char_count": 0,
-            "message": error_msg,
+            "message": str(e),
         }
+    except Exception as e:
+        # Unexpected — this is a bug, so log the full traceback.
+        print(f"❌ Unexpected parse error for {filename}:")
+        traceback.print_exc()
+        return {
+            "status": "failed",
+            "chunk_count": 0,
+            "char_count": 0,
+            "message": f"Internal error while parsing {filename}: {e}",
+        }
+
+    if len(raw_text.strip()) < MIN_USABLE_TEXT_CHARS:
+        return {
+            "status": "failed",
+            "chunk_count": 0,
+            "char_count": len(raw_text),
+            "message": (
+                f"Only {len(raw_text.strip())} characters could be extracted, "
+                f"which is below the {MIN_USABLE_TEXT_CHARS}-character minimum "
+                f"for a useful knowledge base entry."
+            ),
+        }
+
+    print(f"   → Extracted {len(raw_text)} characters")
+
+    metadata = {"filename": filename, "source_type": source_type}
+    if title:
+        metadata["title"] = title
+
+    return await _chunk_embed_store(
+        text=raw_text,
+        document_id=document_id,
+        metadata=metadata,
+        label=filename,
+    )
 
 
 async def ingest_text_content(
@@ -531,40 +597,79 @@ async def ingest_text_content(
     Returns:
         Dict with processing results (same format as ingest_document)
     """
-    try:
-        if not text or len(text.strip()) < 10:
-            return {
-                "status": "failed",
-                "chunk_count": 0,
-                "char_count": 0,
-                "message": "Text content is too short or empty."
-            }
-        
-        # ── Chunk ──
+    if not text or len(text.strip()) < MIN_USABLE_TEXT_CHARS:
+        return {
+            "status": "failed",
+            "chunk_count": 0,
+            "char_count": len(text or ""),
+            "message": "Text content is too short or empty.",
+        }
+
+    metadata = {
+        "filename": title,
+        "source_type": source_type,
+        "title": title,
+    }
+    if source_url:
+        metadata["source_url"] = source_url
+
+    return await _chunk_embed_store(
+        text=text,
+        document_id=document_id,
+        metadata=metadata,
+        label=title,
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+# SHARED BACK-HALF OF THE PIPELINE (Stages 2-4)
+# ══════════════════════════════════════════════════════════════
+
+
+async def _chunk_embed_store(
+    text: str,
+    document_id: str,
+    metadata: dict,
+    label: str,
+) -> dict:
+    """
+    Chunk → embed → store. Shared by both ingest entry points.
+
+    ⚠️  WHY run_in_threadpool?
+    `embedding_service.encode()` is synchronous, CPU-bound PyTorch. Calling it
+    directly inside an `async def` blocks the event loop — meaning the ENTIRE
+    server stops serving requests (including /health) for as long as the
+    embedding takes. On a 50 MB PDF that's minutes of total downtime.
+
+    `run_in_threadpool` hands the work to a worker thread so the event loop
+    stays free. PyTorch releases the GIL during its heavy math, so this
+    genuinely runs in parallel rather than just moving the problem.
+
+    We do the whole chunk+embed+store block in ONE thread hop rather than
+    three, to avoid paying the context-switch cost repeatedly.
+    """
+
+    def _blocking_work() -> tuple[list[str], int]:
+        # ── STAGE 2: Chunk ──
+        print(f"✂️  Chunking (size={settings.CHUNK_SIZE}, overlap={settings.CHUNK_OVERLAP})...")
         chunks = chunk_text(text)
         if not chunks:
-            return {
-                "status": "failed",
-                "chunk_count": 0,
-                "char_count": len(text),
-                "message": "No valid chunks produced from the text."
-            }
-        
-        # ── Embed ──
+            raise ParseError("Text was extracted but no valid chunks were produced.")
+        print(f"   → Created {len(chunks)} chunks")
+
+        # ── STAGE 3: Embed ──
+        print(f"🧠 Embedding {len(chunks)} chunks...")
         vectors = embedding_service.encode(
             chunks,
             batch_size=settings.EMBEDDING_BATCH_SIZE,
+            show_progress=len(chunks) > 50,
         )
-        
-        # ── Store ──
-        metadata = {
-            "filename": title,
-            "source_type": source_type,
-            "title": title,
-        }
-        if source_url:
-            metadata["source_url"] = source_url
-        
+        print(f"   → Generated {len(vectors)} vectors")
+
+        # ── STAGE 4: Store ──
+        # Delete first so re-ingesting a document replaces rather than
+        # duplicates its chunks.
+        print(f"💾 Storing in Qdrant collection '{settings.QDRANT_COLLECTION}'...")
         qdrant_service.delete_by_document(document_id)
         upserted = qdrant_service.upsert_chunks(
             document_id=document_id,
@@ -572,18 +677,34 @@ async def ingest_text_content(
             vectors=vectors,
             metadata=metadata,
         )
-        
-        return {
-            "status": "completed",
-            "chunk_count": len(chunks),
-            "char_count": len(text),
-            "message": f"Successfully processed {len(chunks)} chunks from '{title}'"
-        }
-        
-    except Exception as e:
+        return chunks, upserted
+
+    try:
+        chunks, upserted = await run_in_threadpool(_blocking_work)
+    except ParseError as e:
+        print(f"❌ {label}: {e}")
         return {
             "status": "failed",
             "chunk_count": 0,
-            "char_count": 0,
-            "message": f"Ingestion failed: {str(e)}",
+            "char_count": len(text),
+            "message": str(e),
         }
+    except Exception as e:
+        print(f"❌ Unexpected ingestion error for {label}:")
+        traceback.print_exc()
+        return {
+            "status": "failed",
+            "chunk_count": 0,
+            "char_count": len(text),
+            "message": f"Internal error during ingestion: {e}",
+        }
+
+    print(f"   → Stored {upserted} vectors in Qdrant")
+    print(f"✅ Successfully ingested: {label}")
+
+    return {
+        "status": "completed",
+        "chunk_count": len(chunks),
+        "char_count": len(text),
+        "message": f"Successfully processed {len(chunks)} chunks from '{label}'",
+    }

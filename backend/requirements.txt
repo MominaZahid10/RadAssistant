@@ -40,3 +40,8 @@ aiofiles==24.1.0          # Async file I/O — needed for saving uploaded files 
 # ── Medical Knowledge Sources (Phase 2) ──────────────────────
 biopython==1.84           # Access NCBI/PubMed APIs (E-utilities) — fetch StatPearls articles
 httpx==0.27.0             # Modern async HTTP client — for fetching external medical content
+
+# ── Testing ──────────────────────────────────────────────────
+# Run with: cd backend && pytest tests/ -v
+pytest==8.3.2             # Test runner
+pytest-asyncio==0.24.0    # Lets pytest run `async def` tests (needed from Phase 3)

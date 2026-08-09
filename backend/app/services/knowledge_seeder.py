@@ -37,6 +37,35 @@ from app.data.seed_knowledge import SEED_KNOWLEDGE
 
 settings = get_settings()
 
+# Placeholder values that people leave in .env by accident. Sending these to
+# NCBI would violate their terms of use and can get the IP throttled/blocked,
+# so we treat them as "not configured" rather than trusting the raw string.
+_PLACEHOLDER_EMAILS = {
+    "your_email@example.com",
+    "your@email.com",
+    "radassist@example.com",
+    "user@example.com",
+    "email@example.com",
+    "changeme",
+}
+
+
+def ncbi_is_configured() -> bool:
+    """
+    True only if NCBI_EMAIL looks like a real, usable address.
+
+    WHY THE PLACEHOLDER CHECK?
+    The original gate was `if settings.NCBI_EMAIL:` — but the shipped .env
+    contained `your_email@example.com`, which is truthy. That meant the
+    "skip if not configured" branch never fired and we'd hit a public API
+    with a fake identity.
+    """
+    email = (settings.NCBI_EMAIL or "").strip().lower()
+    if not email or email in _PLACEHOLDER_EMAILS:
+        return False
+    # Minimal sanity check — NCBI requires a contactable address.
+    return "@" in email and "." in email.split("@")[-1]
+
 
 async def seed_curated_knowledge(db: AsyncSession) -> dict:
     """
@@ -166,10 +195,17 @@ async def fetch_and_ingest_statpearls(
     
     try:
         from Bio import Entrez, Medline
-        
-        # Configure NCBI access
-        Entrez.email = settings.NCBI_EMAIL or "radassist@example.com"
-        if settings.NCBI_API_KEY:
+
+        # NCBI requires a real contact address — refuse rather than fake one.
+        if not ncbi_is_configured():
+            results["errors"].append(
+                "NCBI_EMAIL is not set to a real address. NCBI's terms of use "
+                "require a contactable email. Set NCBI_EMAIL in .env."
+            )
+            return results
+
+        Entrez.email = settings.NCBI_EMAIL
+        if settings.NCBI_API_KEY and not settings.NCBI_API_KEY.startswith("your_"):
             Entrez.api_key = settings.NCBI_API_KEY
         
         for term in search_terms:
@@ -310,7 +346,7 @@ async def seed_knowledge_base(db: AsyncSession) -> dict:
     # ── Step 2: NCBI/StatPearls (if configured) ─────────────
     ncbi_results = {"total_fetched": 0, "ingested": 0, "skipped": 0, "failed": 0, "errors": []}
     
-    if settings.NCBI_EMAIL:
+    if ncbi_is_configured():
         print("\n🔬 Fetching StatPearls articles from NCBI...")
         ncbi_results = await fetch_and_ingest_statpearls(db, max_articles=5)
         print(f"   Fetched:  {ncbi_results['total_fetched']}")
@@ -320,8 +356,8 @@ async def seed_knowledge_base(db: AsyncSession) -> dict:
             for err in ncbi_results["errors"]:
                 print(f"   ⚠️  {err}")
     else:
-        print("\n⏭️  Skipping NCBI fetch (NCBI_EMAIL not configured)")
-        print("   Set NCBI_EMAIL in .env to enable StatPearls fetching")
+        print("\n⏭️  Skipping NCBI fetch (NCBI_EMAIL not set to a real address)")
+        print("   Set a real NCBI_EMAIL in .env to enable StatPearls fetching")
     
     print("\n" + "=" * 50)
     print("✅ Knowledge base seeding complete!")

@@ -18,13 +18,14 @@ HTTP STATUS CODES:
 """
 
 from fastapi import APIRouter, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from qdrant_client import QdrantClient
-from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.config import get_settings
 from app.core.database import engine
+from app.services.embedding import embedding_service
+from app.services.qdrant_service import qdrant_service
 
 router = APIRouter()
 settings = get_settings()
@@ -53,6 +54,7 @@ async def health_check():
             "api": "healthy",
             "database": "checking...",
             "qdrant": "checking...",
+            "embedding_model": "checking...",
         }
     }
 
@@ -67,18 +69,29 @@ async def health_check():
         health["status"] = "degraded"
 
     # ── Check Qdrant ─────────────────────────────────────────
+    # Reuse the shared client rather than building a new one per request —
+    # constructing a QdrantClient opens a fresh connection pool each time,
+    # which is wasteful for an endpoint that monitoring hits every few seconds.
+    #
+    # The client is synchronous, so it goes through the threadpool to avoid
+    # blocking the event loop if Qdrant is slow to answer.
     try:
-        # Create a temporary client and check if Qdrant responds
-        qdrant = QdrantClient(
-            host=settings.QDRANT_HOST,
-            port=settings.QDRANT_PORT,
-            timeout=5,
-        )
-        # get_collections() is a lightweight call to verify connectivity
-        qdrant.get_collections()
+        await run_in_threadpool(qdrant_service.client.get_collections)
         health["components"]["qdrant"] = "connected"
     except Exception as e:
         health["components"]["qdrant"] = f"disconnected: {str(e)}"
+        health["status"] = "degraded"
+
+    # ── Check the embedding model ────────────────────────────
+    # Without this, ingestion and search fail while /health still says
+    # everything is fine — exactly the blind spot a health check should close.
+    if embedding_service.is_loaded:
+        info = embedding_service.get_info()
+        health["components"]["embedding_model"] = (
+            f"loaded: {info['model_name']} ({info['dimension']}D)"
+        )
+    else:
+        health["components"]["embedding_model"] = "not loaded"
         health["status"] = "degraded"
 
     # ── Return appropriate HTTP status ────────────────────────

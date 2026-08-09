@@ -49,7 +49,11 @@ services:
   # Stores: document embeddings for semantic search (RAG retrieval)
   # Dashboard: http://localhost:6333/dashboard
   qdrant:
-    image: qdrant/qdrant:latest
+    # PINNED, not :latest — the Python client (qdrant-client==1.10.0) and the
+    # server share a wire protocol. Letting the server float to :latest means
+    # a future release can break your app with no code change on your side.
+    # Upgrade both together, deliberately.
+    image: qdrant/qdrant:v1.10.1
     container_name: radassist-qdrant
     restart: unless-stopped
     ports:
@@ -73,15 +77,25 @@ services:
       dockerfile: Dockerfile
     container_name: radassist-backend
     restart: unless-stopped
+    # --reload lives HERE, not in the Dockerfile, so the image itself stays
+    # production-deployable. This override is dev-only.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
+    env_file:
+      - ./backend/.env           # API keys and everything else
     environment:
+      # These override .env so the container always uses Docker hostnames,
+      # even if .env was edited for running the backend outside Docker.
       - DATABASE_URL=postgresql+asyncpg://radassist:radassist_secret@postgres:5432/radassist_db
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - DEBUG=true
+      - UPLOAD_DIR=/app/uploads
     volumes:
       - ./backend:/app             # Mount code for hot reload
+      - uploads_data:/app/uploads  # Named volume so uploads don't land in your source tree
+      - hf_cache:/root/.cache/huggingface  # Persist the ~80MB embedding model between rebuilds
     depends_on:
       postgres:
         condition: service_healthy  # Wait for DB to be ready
@@ -112,3 +126,5 @@ services:
 volumes:
   postgres_data:
   qdrant_data:
+  uploads_data:
+  hf_cache:

@@ -25,7 +25,9 @@ node_modules/
 .next/
 out/
 npm-debug.log*
-package-lock.json
+# NOTE: package-lock.json is deliberately NOT ignored. It pins exact
+# dependency versions so `npm ci` reproduces identical builds, and the
+# frontend Dockerfile copies it. Ignoring lockfiles breaks reproducibility.
 
 # ── Docker ────────────────────────────────────────────────────
 docker-compose.override.yml
@@ -45,6 +47,10 @@ ehthumbs.db
 
 # ── Project document ─────────────────────────────────────────
 *.docx
+
+# ── Uploads & model cache ─────────────────────────────────────
+backend/uploads/
+.cache/
 
 # ── Misc ──────────────────────────────────────────────────────
 *.log

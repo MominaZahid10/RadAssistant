@@ -13,6 +13,21 @@ knowledge found in authoritative sources including:
   • Felson's Principles of Chest Roentgenology (textbook standard)
   • Fundamentals of Diagnostic Radiology (Brant & Helms)
 
+⚠️  WHAT THIS CONTENT IS — AND WHAT IT ISN'T:
+These entries are **summaries written to reflect** the sources named below.
+They are NOT verbatim extracts, and they carry no PMID, DOI or URL, so a
+reader cannot trace a statement back to a specific page or paper.
+
+That is why every entry uses source_type "curated_summary" rather than
+"textbook" or "guideline" — labelling them as primary sources in the evidence
+panel would overstate what they are.
+
+For verifiable, citable content use the PMC Open Access ingestion
+(POST /api/v1/knowledge/fetch-pmc), where every article carries a real PMCID,
+PMID, DOI and a clickable source_url. This curated set exists so the system
+has a coherent baseline knowledge base offline; it is not a substitute for
+primary literature.
+
 DISCLAIMER:
 This is an educational/research tool. All clinical decisions must be made
 by qualified radiologists. This system assists — it does NOT replace
@@ -38,7 +53,7 @@ SEED_KNOWLEDGE: list[dict] = [
 
     {
         "title": "Systematic Approach to Chest X-Ray Interpretation",
-        "source_type": "guideline",
+        "source_type": "curated_summary",
         "source_attribution": "Based on Felson's Principles of Chest Roentgenology and ACR Practice Guidelines",
         "content": """
 Systematic Approach to Chest X-Ray (CXR) Interpretation
@@ -73,7 +88,7 @@ Technical Adequacy Assessment: Before interpretation, confirm the radiograph is 
 
     {
         "title": "Pneumonia — Radiographic Findings and Patterns",
-        "source_type": "textbook",
+        "source_type": "curated_summary",
         "source_attribution": "Based on StatPearls 'Pneumonia, Imaging' and Fundamentals of Diagnostic Radiology",
         "content": """
 Pneumonia — Radiographic Diagnosis and Classification
@@ -130,7 +145,7 @@ Follow-up Recommendations:
 
     {
         "title": "Pneumothorax — Types, Imaging, and Management",
-        "source_type": "textbook",
+        "source_type": "curated_summary",
         "source_attribution": "Based on StatPearls 'Pneumothorax' and British Thoracic Society Guidelines",
         "content": """
 Pneumothorax — Radiographic Diagnosis and Classification
@@ -190,7 +205,7 @@ Management Principles:
 
     {
         "title": "Pleural Effusion — Imaging Characteristics and Differential Diagnosis",
-        "source_type": "textbook",
+        "source_type": "curated_summary",
         "source_attribution": "Based on StatPearls 'Pleural Effusion' and Light's Criteria",
         "content": """
 Pleural Effusion — Comprehensive Imaging Guide
@@ -264,7 +279,7 @@ Special Types:
 
     {
         "title": "Pulmonary Edema — Cardiogenic vs Non-Cardiogenic",
-        "source_type": "textbook",
+        "source_type": "curated_summary",
         "source_attribution": "Based on StatPearls 'Pulmonary Edema' and Radiology Review Manual (Dahnert)",
         "content": """
 Pulmonary Edema — Radiographic Differentiation
@@ -340,7 +355,7 @@ Differential Quick Reference:
 
     {
         "title": "Pulmonary Embolism — CT Pulmonary Angiography (CTPA) Findings",
-        "source_type": "textbook",
+        "source_type": "curated_summary",
         "source_attribution": "Based on StatPearls 'Pulmonary Embolism Imaging' and PIOPED II study guidelines",
         "content": """
 Pulmonary Embolism (PE) — CT Pulmonary Angiography Diagnosis
@@ -406,7 +421,7 @@ Follow-up: D-dimer is used to rule out PE in low-probability patients (high sens
 
     {
         "title": "Acute Stroke — CT and MRI Imaging Findings",
-        "source_type": "textbook",
+        "source_type": "curated_summary",
         "source_attribution": "Based on StatPearls 'Stroke Imaging' and AHA/ASA Stroke Imaging Guidelines",
         "content": """
 Acute Stroke — Neuroimaging Diagnosis
@@ -488,7 +503,7 @@ HEMORRHAGE TYPES:
 
     {
         "title": "Acute Abdomen — Imaging Approach and Key Findings",
-        "source_type": "textbook",
+        "source_type": "curated_summary",
         "source_attribution": "Based on StatPearls 'Acute Abdomen Imaging' and ACR Appropriateness Criteria",
         "content": """
 Acute Abdomen — Systematic Imaging Approach
@@ -568,7 +583,7 @@ ULTRASOUND — Key Applications:
 
     {
         "title": "Fracture Assessment — Radiographic Principles and Commonly Missed Fractures",
-        "source_type": "textbook",
+        "source_type": "curated_summary",
         "source_attribution": "Based on StatPearls 'Fracture Assessment' and Emergency Radiology guidelines",
         "content": """
 Fracture Assessment — Systematic Radiographic Approach
@@ -642,7 +657,7 @@ Pediatric-Specific Considerations:
 
     {
         "title": "Imaging Modalities — How X-Ray, CT, MRI, and Ultrasound Work",
-        "source_type": "guideline",
+        "source_type": "curated_summary",
         "source_attribution": "Based on Fundamentals of Diagnostic Radiology (Brant & Helms) and ACR Practice Guidelines",
         "content": """
 Imaging Modalities in Radiology — Principles and Applications
@@ -728,7 +743,7 @@ Common Applications: OB/GYN, hepatobiliary, thyroid, vascular, MSK, eFAST in tra
 
     {
         "title": "Structured Radiology Reporting — Best Practices and Standards",
-        "source_type": "guideline",
+        "source_type": "curated_summary",
         "source_attribution": "Based on ACR Practice Guidelines, RSNA Reporting Initiative, and ESR Guidelines",
         "content": """
 Structured Radiology Reporting — Standards and Best Practices
@@ -809,7 +824,7 @@ ACR Practice Parameter requires direct verbal communication for critical/unexpec
 
     {
         "title": "Contrast Media — Types, Reactions, and Safety Protocols",
-        "source_type": "guideline",
+        "source_type": "curated_summary",
         "source_attribution": "Based on ACR Manual on Contrast Media (Version 2024) and ACR-SPR Practice Parameters",
         "content": """
 Contrast Media in Radiology — Safety and Protocols
@@ -890,7 +905,7 @@ CONTRAST EXTRAVASATION:
 
     {
         "title": "Lung Nodules — Assessment, Classification, and Follow-Up (Fleischner Society)",
-        "source_type": "guideline",
+        "source_type": "curated_summary",
         "source_attribution": "Based on Fleischner Society 2017 Guidelines and ACR Lung-RADS v1.1",
         "content": """
 Pulmonary Nodule Assessment — Evidence-Based Management
@@ -960,7 +975,7 @@ Malignant: Primary lung cancer (adenocarcinoma most common), solitary metastasis
 
     {
         "title": "Trauma Imaging — eFAST, CT Trauma Protocol, and Critical Injuries",
-        "source_type": "guideline",
+        "source_type": "curated_summary",
         "source_attribution": "Based on ATLS (Advanced Trauma Life Support) Guidelines and ACR Appropriateness Criteria for Trauma",
         "content": """
 Trauma Imaging — Systematic Approach to the Injured Patient

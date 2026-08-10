@@ -9,7 +9,7 @@
 #   qdrant_service.py → Manage vector storage in Qdrant
 #   ingestion.py     → Full document processing pipeline
 #
-# Future Phases:
-#   report_service.py → Report generation (Phase 3)
-#   llm_service.py    → LLM integration (Phase 3)
-#   chat_service.py   → AI assistant (Phase 3+)
+# Phase 3:
+#   llm_service.py   → Multi-provider LLM integration (Groq/Mistral/OpenAI)
+#   rag_service.py   → RAG orchestrator (retrieval + prompt + generation)
+

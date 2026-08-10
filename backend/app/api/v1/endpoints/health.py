@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.core.database import engine
 from app.services.embedding import embedding_service
 from app.services.qdrant_service import qdrant_service
+from app.services.llm_service import llm_service
 
 router = APIRouter()
 settings = get_settings()
@@ -37,15 +38,23 @@ settings = get_settings()
     description="Verifies that the API, database, and vector store are operational.",
     tags=["System"],
 )
-async def health_check():
+async def health_check(verify_llm: bool = False):
     """
     Check the health of all system components.
-    
+
     Returns a JSON object with the status of:
-    - api: Always "healthy" if this code runs
-    - database: "connected" or "disconnected" 
-    - qdrant: "connected" or "disconnected"
-    - overall status: "healthy" only if ALL components are up
+    - api:             Always "healthy" if this code runs
+    - database:        "connected" or "disconnected"
+    - qdrant:          "connected" or "disconnected"
+    - embedding_model: loaded model name and dimension
+    - llm:             active provider/model, and which keys are present
+    - overall status:  "healthy" only if ALL components are up
+
+    Query params:
+        verify_llm — if true, makes a real (tiny) LLM API call to confirm the
+                     key works. Off by default so that monitoring polling this
+                     endpoint every few seconds doesn't burn tokens or hit rate
+                     limits.
     """
     health = {
         "status": "healthy",
@@ -55,6 +64,7 @@ async def health_check():
             "database": "checking...",
             "qdrant": "checking...",
             "embedding_model": "checking...",
+            "llm": "checking...",
         }
     }
 
@@ -93,6 +103,32 @@ async def health_check():
     else:
         health["components"]["embedding_model"] = "not loaded"
         health["status"] = "degraded"
+
+    # ── Check the LLM provider (Phase 3) ─────────────────────
+    # Config-only by default: reports whether a key exists, without spending
+    # tokens. Pass ?verify_llm=true to make a real 5-token API call.
+    llm_info = llm_service.get_provider_info()
+    configured = [n for n, p in llm_info["providers"].items() if p["configured"]]
+
+    if not configured:
+        health["components"]["llm"] = "not configured — /chat will return 503"
+        health["status"] = "degraded"
+    elif verify_llm:
+        check = await llm_service.check_connectivity()
+        if check["status"] == "ok":
+            suffix = "" if check.get("is_primary", True) else " (via fallback)"
+            health["components"]["llm"] = (
+                f"verified: {check['provider']} / {check['model']}{suffix}"
+            )
+        else:
+            health["components"]["llm"] = f"unreachable: {check.get('error', 'unknown')}"
+            health["status"] = "degraded"
+    else:
+        health["components"]["llm"] = (
+            f"configured: {llm_info['active_provider']} / "
+            f"{llm_info['active_model']} "
+            f"(keys: {', '.join(configured)})"
+        )
 
     # ── Return appropriate HTTP status ────────────────────────
     if health["status"] != "healthy":

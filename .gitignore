@@ -50,6 +50,7 @@ ehthumbs.db
 
 # ── Uploads & model cache ─────────────────────────────────────
 backend/uploads/
+backend/.hf_cache/
 .cache/
 
 # ── Misc ──────────────────────────────────────────────────────

@@ -15,9 +15,11 @@ Run with:
     pytest backend/tests/ -v
 """
 
+import re
+
 import pytest
 
-from app.services.ingestion import chunk_text
+from app.services.ingestion import chunk_text, _tail_overlap
 
 
 # ══════════════════════════════════════════════════════════════
@@ -154,6 +156,92 @@ def test_paragraphs_that_fit_are_not_fragmented():
     # somewhere in full rather than being split across two chunks.
     for paragraph in paragraphs:
         assert any(paragraph in c for c in chunks), f"fragmented: {paragraph!r}"
+
+
+# ══════════════════════════════════════════════════════════════
+# OVERLAP WORD BOUNDARIES
+# ══════════════════════════════════════════════════════════════
+# Regression tests for a defect found in live search output: the overlap
+# window sliced by raw character count, so chunks could begin mid-word.
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize("width", [12, 20, 25, 30, 40, 50])
+def test_tail_overlap_never_starts_mid_word(width):
+    """
+    Whatever the overlap width, the returned text must begin at a real word —
+    never at a fragment left behind by slicing on character count.
+    """
+    text = "It is a critical diagnosis that must not be missed on chest imaging."
+    words = set(text.replace(".", "").split())
+
+    overlap = _tail_overlap(text, width)
+    first_word = overlap.split()[0].strip(".,;:")
+
+    assert first_word in words, (
+        f"width={width} produced fragment {first_word!r} from raw slice "
+        f"{text[-width:]!r}"
+    )
+
+
+def test_tail_overlap_fixes_the_observed_production_case():
+    """
+    The exact string from the seeded Pneumothorax article whose chunk 1 began
+    with 'e missed on chest imaging' in live search results.
+    """
+    text = "It is a critical diagnosis that must not be missed on chest imaging."
+
+    # Reproduce the defect: a raw character slice starts mid-word.
+    raw = text[-26:]
+    assert raw.split()[0] not in text.split(), f"expected a fragment, got {raw!r}"
+
+    assert _tail_overlap(text, 26).startswith("missed on chest imaging")
+
+
+def test_tail_overlap_keeps_raw_window_when_no_whitespace():
+    """
+    A single very long token (chemical name, OCR artefact) has no boundary to
+    snap to. Returning empty would silently drop the overlap entirely.
+    """
+    assert _tail_overlap("A" * 200, 40) == "A" * 40
+
+
+def test_no_chunk_begins_mid_word():
+    """
+    The exact failure seen in production search results. Every chunk after the
+    first begins with overlap text, and that text must start at a word.
+    """
+    text = (
+        "Pneumothorax is the presence of air in the pleural space, causing "
+        "partial or complete lung collapse. It is a critical diagnosis that "
+        "must not be missed on chest imaging. The visceral pleural line is a "
+        "thin white line separated from the chest wall with no lung markings "
+        "beyond it, which is the hallmark radiographic finding."
+    )
+    chunks = chunk_text(text, chunk_size=120, chunk_overlap=40)
+
+    words = set(re.findall(r"[A-Za-z]+", text))
+    for chunk in chunks:
+        first = re.match(r"[A-Za-z]+", chunk)
+        if first:
+            assert first.group() in words, (
+                f"chunk begins with word fragment {first.group()!r}: {chunk[:60]!r}"
+            )
+
+
+def test_overlap_still_provides_context():
+    """
+    Snapping to a word boundary must not eliminate the overlap — the whole
+    point is that a finding spanning a boundary appears complete somewhere.
+    """
+    text = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet. " * 6
+    chunks = chunk_text(text, chunk_size=150, chunk_overlap=40)
+
+    assert len(chunks) > 1
+    # Consecutive chunks should share at least one word.
+    for earlier, later in zip(chunks, chunks[1:]):
+        shared = set(earlier.split()) & set(later.split())
+        assert shared, f"no overlap between {earlier[-40:]!r} and {later[:40]!r}"
 
 
 def test_zero_overlap_is_respected_not_overridden():

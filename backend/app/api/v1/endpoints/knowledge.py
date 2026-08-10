@@ -61,16 +61,49 @@ from app.schemas.document import (
     SearchResult,
     KnowledgeBaseStats,
 )
+from app.schemas.rag import PMCFetchRequest
 from app.data.seed_knowledge import SEED_KNOWLEDGE
 from app.services.ingestion import ingest_document
 from app.services.embedding import embedding_service
-from app.services.knowledge_seeder import seed_knowledge_base
+from app.services.knowledge_seeder import seed_knowledge_base, ncbi_is_configured
+from app.services.pmc_fetcher import fetch_and_ingest_pmc, DEFAULT_TOPICS
 from app.services.qdrant_service import qdrant_service
 
 settings = get_settings()
 
 # Create the router — all endpoints here get the /knowledge prefix
 router = APIRouter(prefix="/knowledge", tags=["Knowledge Base"])
+
+
+def _require_embedding_model() -> None:
+    """
+    Refuse ingestion outright when the embedding model isn't loaded.
+
+    ⚠️  WHY THIS GUARD EXISTS:
+    Without it, /seed and /fetch-pmc happily created 103 database rows, ran
+    every one through the pipeline, and marked all 103 "failed" — producing a
+    knowledge base that looked catastrophically broken when the real problem
+    was a single missing model file. The user then has to clean up 103 rows
+    before retrying.
+
+    Checking once, up front, turns that into a clear 503 and zero side effects.
+    """
+    if not embedding_service.is_loaded:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "The embedding model is not loaded, so nothing can be indexed. "
+                "Ingestion is refused rather than creating documents that would "
+                "all fail.\n\n"
+                "Most likely the model cache is empty while HF_HUB_OFFLINE=1 "
+                "blocks downloading it. Populate it once with a working "
+                "connection:\n"
+                "    HF_HUB_OFFLINE=0 docker-compose up -d backend\n\n"
+                "Then set HF_HUB_OFFLINE=1 again. The cache lives in "
+                "backend/.hf_cache on the host, so it survives docker-compose "
+                "down -v."
+            ),
+        )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -188,6 +221,8 @@ async def upload_document(
 
     The frontend polls GET /knowledge/documents/{id} to track progress.
     """
+    _require_embedding_model()
+
     # ── Validate file extension ─────────────────────────────
     if not file.filename:
         raise HTTPException(
@@ -538,6 +573,8 @@ async def seed_knowledge(background_tasks: BackgroundTasks):
     Docker healthchecks. An explicit endpoint means seeding happens when you
     decide it should.
     """
+    _require_embedding_model()
+
     async def _run_seed() -> None:
         # Fresh session — the request-scoped one is closed by now.
         async with async_session() as db:
@@ -553,6 +590,74 @@ async def seed_knowledge(background_tasks: BackgroundTasks):
         "message": "Knowledge base seeding started in the background.",
         "curated_articles": len(SEED_KNOWLEDGE),
         "ncbi_fetch_enabled": bool(settings.NCBI_EMAIL),
+        "next_step": "Poll GET /api/v1/knowledge/stats to watch documents appear.",
+    }
+
+
+@router.post(
+    "/fetch-pmc",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ingest peer-reviewed articles from PubMed Central Open Access",
+    description=(
+        "Searches the **PMC Open Access Subset** for radiology topics and "
+        "ingests the full text of each article.\n\n"
+        "Unlike the curated seed content, every article ingested here carries "
+        "a real PMCID, PMID and DOI, and a `source_url` a clinician can open "
+        "and verify — which is what makes the evidence panel genuinely "
+        "traceable.\n\n"
+        "Only articles inside the Open Access Subset are retrieved; anything "
+        "whose licence can't be positively confirmed is skipped.\n\n"
+        "**Idempotent** — articles already ingested are skipped, so running "
+        "this repeatedly tops up the corpus rather than duplicating it.\n\n"
+        "Runs in the background. Expect roughly 1–3 minutes for the default "
+        "topic list; poll `GET /knowledge/stats` to watch it grow."
+    ),
+)
+async def fetch_pmc(
+    background_tasks: BackgroundTasks,
+    request: PMCFetchRequest | None = None,
+):
+    """
+    Trigger PMC Open Access ingestion.
+
+    Body (all optional):
+        {"topics": ["pneumothorax chest imaging", ...], "max_per_topic": 15}
+
+    Omit the body entirely to use the default radiology topic list.
+    """
+    _require_embedding_model()
+
+    if not ncbi_is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "NCBI_EMAIL is not set to a real address. NCBI's terms of use "
+                "require a contactable email on every request. Set NCBI_EMAIL "
+                "in backend/.env and restart the backend."
+            ),
+        )
+
+    req = request or PMCFetchRequest()
+    max_per_topic = req.max_per_topic
+    topic_list = [t.strip() for t in (req.topics or []) if t.strip()] or None
+
+    async def _run() -> None:
+        async with async_session() as db:
+            try:
+                summary = await fetch_and_ingest_pmc(
+                    db, topics=topic_list, max_per_topic=max_per_topic
+                )
+                print(f"📚 PMC ingestion complete: {summary}")
+            except Exception as e:  # noqa: BLE001
+                await db.rollback()
+                print(f"❌ PMC ingestion failed: {e}")
+
+    background_tasks.add_task(_run)
+
+    return {
+        "message": "PMC Open Access ingestion started in the background.",
+        "topics": topic_list or DEFAULT_TOPICS,
+        "max_per_topic": max_per_topic,
         "next_step": "Poll GET /api/v1/knowledge/stats to watch documents appear.",
     }
 

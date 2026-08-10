@@ -1,27 +1,318 @@
 /**
  * RadAssist AI — Chat Page (Main Interface)
- * 
- * Clean chat interface like ChatGPT/Claude:
- * - Messages area in the center
- * - Input box pinned to bottom
- * - Welcome screen when no messages
+ *
+ * Real RAG-powered chat with:
+ * - SSE streaming (token-by-token typewriter effect)
+ * - Source citations panel (collapsible evidence)
+ * - Audience toggle (radiologist / resident)
+ * - Error handling for LLM failures
  */
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { api, type SSEEvent, type SourceReference, type Audience } from "@/lib/api";
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  sources?: SourceReference[];
+  model?: string;
+  isStreaming?: boolean;
+  isError?: boolean;
+}
+
+/**
+ * Splits answer text on inline [N] citations and renders each as a clickable
+ * chip that jumps to the matching source card.
+ *
+ * WHY THIS MATTERS:
+ * The grounding prompt requires every factual claim to carry a citation.
+ * Rendering them as plain text makes that requirement decorative — the
+ * radiologist can see "[3]" but can't get to what [3] actually says. Being
+ * able to trace a claim to its source in one click is the entire premise of
+ * the product.
+ *
+ * ROBUSTNESS NOTES:
+ * - Matches [1] and grouped forms like [1,2] or [1, 3].
+ * - Also accepts 【N】 as a fallback. The backend normalises these (some
+ *   models, notably gpt-oss, emit CJK lenticular brackets), but accepting
+ *   both here means a normalisation gap degrades to "citation still works"
+ *   rather than "evidence panel silently dead".
+ * - Only linkifies numbers within range of the sources actually received.
+ *   A model that hallucinates [9] against 5 sources renders it as plain
+ *   text rather than a dead link.
+ * - Runs mid-stream on partial text, so a half-written "[2" simply stays
+ *   literal until the closing bracket arrives.
+ */
+/**
+ * Minimal markdown renderer with inline citation support.
+ *
+ * WHY NOT react-markdown?
+ * Two reasons. Citations need to render *inside* bold text, list items and
+ * table cells — wiring that into a third-party renderer means custom AST
+ * handlers and fighting its escaping. And this must tolerate half-finished
+ * markdown, because it runs on every streamed token: a table with two of its
+ * five rows written, or an unclosed `**`, must render sensibly rather than
+ * throw. A purpose-built renderer handles both directly.
+ *
+ * Supports: headings, **bold**, *italic*, `code`, bullet and numbered lists,
+ * GFM tables, blockquotes, horizontal rules — plus [N] citation chips.
+ */
+
+/** Inline spans: **bold**, *italic*, `code`, and [N] / 【N】 citations. */
+function renderInline(
+  text: string,
+  sourceCount: number,
+  onCitationClick: (n: number) => void,
+  keyPrefix: string
+): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const re =
+    /(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\n]+\*)|(`[^`\n]+`)|([[【]\s*\d+(?:\s*,\s*\d+)*\s*[\]】])/g;
+
+  let last = 0;
+  let i = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    const tok = m[0];
+
+    if (tok.startsWith("**") || tok.startsWith("__")) {
+      nodes.push(<strong key={`${keyPrefix}b${i++}`}>{tok.slice(2, -2)}</strong>);
+    } else if (tok.startsWith("`")) {
+      nodes.push(
+        <code key={`${keyPrefix}c${i++}`} className="md-code">
+          {tok.slice(1, -1)}
+        </code>
+      );
+    } else if (tok.startsWith("*")) {
+      nodes.push(<em key={`${keyPrefix}i${i++}`}>{tok.slice(1, -1)}</em>);
+    } else {
+      // Citation. Only linkify numbers that map to a source we actually have —
+      // a hallucinated [9] against 4 sources stays as plain text rather than
+      // becoming a dead link.
+      const nums = tok
+        .replace(/[[\]【】\s]/g, "")
+        .split(",")
+        .map((n) => parseInt(n, 10))
+        .filter((n) => Number.isFinite(n));
+
+      const valid = nums.length > 0 && nums.every((n) => n >= 1 && n <= sourceCount);
+
+      if (!valid) {
+        nodes.push(tok);
+      } else {
+        nums.forEach((n) =>
+          nodes.push(
+            <button
+              key={`${keyPrefix}cite${i++}`}
+              type="button"
+              className="citation-chip"
+              title={`Jump to source ${n}`}
+              aria-label={`Show source ${n}`}
+              onClick={() => onCitationClick(n)}
+            >
+              {n}
+            </button>
+          )
+        );
+      }
+    }
+    last = m.index + tok.length;
+  }
+
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
+const isTableRow = (l: string) => /^\s*\|.*\|\s*$/.test(l);
+const isTableDivider = (l: string) => /^\s*\|[\s:|-]+\|\s*$/.test(l);
+const splitRow = (l: string) =>
+  l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+
+function MarkdownAnswer({
+  text,
+  sourceCount,
+  onCitationClick,
+}: {
+  text: string;
+  sourceCount: number;
+  onCitationClick: (n: number) => void;
+}) {
+  if (!text) return null;
+
+  const lines = text.split("\n");
+  const blocks: React.ReactNode[] = [];
+  let k = 0;
+  let i = 0;
+
+  const inline = (s: string, p: string) =>
+    renderInline(s, sourceCount, onCitationClick, p);
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // ── blank ──
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+
+    // ── horizontal rule ──
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      blocks.push(<hr key={`hr${k++}`} className="md-hr" />);
+      i++;
+      continue;
+    }
+
+    // ── heading ──
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      const level = h[1].length;
+      const Tag = (["h3", "h4", "h5", "h6"] as const)[level - 1];
+      blocks.push(
+        <Tag key={`h${k++}`} className={`md-h md-h${level}`}>
+          {inline(h[2], `h${k}`)}
+        </Tag>
+      );
+      i++;
+      continue;
+    }
+
+    // ── table ──
+    if (isTableRow(line) && i + 1 < lines.length && isTableDivider(lines[i + 1])) {
+      const header = splitRow(line);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && isTableRow(lines[i])) {
+        rows.push(splitRow(lines[i]));
+        i++;
+      }
+      blocks.push(
+        <div key={`tw${k++}`} className="md-table-wrap">
+          <table className="md-table">
+            <thead>
+              <tr>
+                {header.map((c, ci) => (
+                  <th key={ci}>{inline(c, `th${k}${ci}`)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, ri) => (
+                <tr key={ri}>
+                  {r.map((c, ci) => (
+                    <td key={ci}>{inline(c, `td${k}${ri}${ci}`)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+
+    // A table still being streamed — header written, divider not yet.
+    // Render as plain text for now; it becomes a table on the next token.
+    if (isTableRow(line) && i + 1 >= lines.length) {
+      blocks.push(
+        <p key={`p${k++}`} className="md-p md-partial">
+          {inline(line, `pp${k}`)}
+        </p>
+      );
+      i++;
+      continue;
+    }
+
+    // ── blockquote ──
+    if (/^\s*>\s?/.test(line)) {
+      const buf: string[] = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        buf.push(lines[i].replace(/^\s*>\s?/, ""));
+        i++;
+      }
+      blocks.push(
+        <blockquote key={`bq${k++}`} className="md-quote">
+          {inline(buf.join(" "), `bq${k}`)}
+        </blockquote>
+      );
+      continue;
+    }
+
+    // ── unordered list ──
+    if (/^\s*[-*+]\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[-*+]\s+/, ""));
+        i++;
+      }
+      blocks.push(
+        <ul key={`ul${k++}`} className="md-ul">
+          {items.map((it, ii) => (
+            <li key={ii}>{inline(it, `li${k}${ii}`)}</li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    // ── ordered list ──
+    if (/^\s*\d+[.)]\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*\d+[.)]\s+/, ""));
+        i++;
+      }
+      blocks.push(
+        <ol key={`ol${k++}`} className="md-ol">
+          {items.map((it, ii) => (
+            <li key={ii}>{inline(it, `oli${k}${ii}`)}</li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    // ── paragraph (consume until blank line or a new block starts) ──
+    const buf: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^\s*[-*+]\s+/.test(lines[i]) &&
+      !/^\s*\d+[.)]\s+/.test(lines[i]) &&
+      !/^\s*>/.test(lines[i]) &&
+      !/^#{1,4}\s/.test(lines[i]) &&
+      !isTableRow(lines[i])
+    ) {
+      buf.push(lines[i].trim());
+      i++;
+    }
+    if (buf.length) {
+      blocks.push(
+        <p key={`p${k++}`} className="md-p">
+          {inline(buf.join(" "), `pi${k}`)}
+        </p>
+      );
+    } else {
+      i++;
+    }
+  }
+
+  return <div className="markdown-body">{blocks}</div>;
 }
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [audience, setAudience] = useState<Audience>("radiologist");
+  const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -37,6 +328,18 @@ export default function ChatPage() {
     }
   }, [input]);
 
+  const toggleSources = useCallback((messageId: string) => {
+    setExpandedSources((prev) => {
+      const next = new Set(prev);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
+  }, []);
+
   const handleSend = async () => {
     const trimmed = input.trim();
     if (!trimmed || isLoading) return;
@@ -47,21 +350,96 @@ export default function ChatPage() {
       role: "user",
       content: trimmed,
     };
-    setMessages((prev) => [...prev, userMsg]);
+
+    // Create placeholder for AI response
+    const aiMsgId = (Date.now() + 1).toString();
+    const aiMsg: Message = {
+      id: aiMsgId,
+      role: "assistant",
+      content: "",
+      isStreaming: true,
+    };
+
+    setMessages((prev) => [...prev, userMsg, aiMsg]);
     setInput("");
     setIsLoading(true);
 
-    // Simulate AI response (will be replaced with real RAG in Phase 3)
-    setTimeout(() => {
-      const aiMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content:
-          "I'm RadAssist AI, your radiology reporting assistant. The RAG pipeline isn't connected yet (that's Phase 3!), but the infrastructure is ready. Once connected, I'll be able to:\n\n• Generate structured radiology reports from your findings\n• Search the knowledge base for relevant guidelines & templates\n• Find similar past cases\n• Suggest differential diagnoses with evidence\n\nEvery suggestion will come with traceable sources — no black-box answers.",
-      };
-      setMessages((prev) => [...prev, aiMsg]);
+    try {
+      // Stream the response from the RAG pipeline
+      for await (const event of api.streamChat(trimmed, {
+        audience,
+        includeSources: true,
+      })) {
+        switch (event.type) {
+          case "sources":
+            // Sources arrive first — attach them to the AI message
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === aiMsgId
+                  ? { ...msg, sources: event.sources }
+                  : msg
+              )
+            );
+            break;
+
+          case "token":
+            // Append each token to the AI message content
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === aiMsgId
+                  ? { ...msg, content: msg.content + event.token }
+                  : msg
+              )
+            );
+            break;
+
+          case "done":
+            // Mark streaming as complete, record the model used
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === aiMsgId
+                  ? { ...msg, isStreaming: false, model: event.model }
+                  : msg
+              )
+            );
+            break;
+
+          case "error":
+            // Show the error in the AI message
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === aiMsgId
+                  ? {
+                      ...msg,
+                      content: `⚠️ ${event.error}`,
+                      isStreaming: false,
+                      isError: true,
+                    }
+                  : msg
+              )
+            );
+            break;
+        }
+      }
+    } catch (err) {
+      // Network error or failed to connect
+      const errorMessage =
+        err instanceof Error ? err.message : "Failed to connect to the server";
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === aiMsgId
+            ? {
+                ...msg,
+                content: `⚠️ ${errorMessage}`,
+                isStreaming: false,
+                isError: true,
+              }
+            : msg
+        )
+      );
+    } finally {
       setIsLoading(false);
-    }, 1500);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -78,15 +456,37 @@ export default function ChatPage() {
         {messages.length === 0 ? (
           /* Welcome Screen */
           <div className="h-full flex items-center justify-center">
-            <div className="text-center max-w-md">
-              <div className="text-5xl mb-4">🩻</div>
-              <h1 className="text-2xl font-semibold text-gradient mb-2">
+            <div className="text-center max-w-lg px-4">
+              <div className="text-6xl mb-5">🩻</div>
+              <h1 className="text-2xl font-semibold text-gradient mb-3">
                 RadAssist AI
               </h1>
-              <p className="text-foreground-secondary text-sm leading-relaxed">
-                Your radiology reporting assistant. Ask about findings,
-                generate reports, or search the knowledge base.
+              <p className="text-foreground-secondary text-sm leading-relaxed mb-8">
+                Your radiology decision-support assistant. Ask about findings,
+                search the knowledge base, or get structured report suggestions
+                — every answer is grounded in evidence with traceable sources.
               </p>
+
+              {/* Example prompts */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-md mx-auto">
+                {[
+                  "What are the radiographic findings of pneumothorax?",
+                  "Explain the Fleischner criteria for pulmonary nodules",
+                  "CTPA findings for pulmonary embolism",
+                  "Describe the ABCDE approach to chest X-ray",
+                ].map((prompt, i) => (
+                  <button
+                    key={i}
+                    onClick={() => {
+                      setInput(prompt);
+                      textareaRef.current?.focus();
+                    }}
+                    className="text-left px-4 py-3 rounded-xl border border-border text-xs text-foreground-secondary hover:text-foreground hover:bg-surface-hover hover:border-border-hover transition-all duration-200"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         ) : (
@@ -109,29 +509,131 @@ export default function ChatPage() {
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-medium text-foreground-muted mb-1">
                     {msg.role === "user" ? "You" : "RadAssist AI"}
+                    {msg.model && (
+                      <span className="ml-2 text-foreground-muted/60 font-normal">
+                        via {msg.model}
+                      </span>
+                    )}
                   </p>
-                  <div className="text-sm text-foreground leading-relaxed whitespace-pre-wrap">
-                    {msg.content}
+                  <div
+                    className={`text-sm leading-relaxed ${
+                      msg.role === "user" ? "whitespace-pre-wrap" : ""
+                    } ${msg.isError ? "text-error" : "text-foreground"}`}
+                  >
+                    <MarkdownAnswer
+                      text={msg.content}
+                      sourceCount={msg.sources?.length ?? 0}
+                      onCitationClick={(n) => {
+                        // Make sure the panel is open, then scroll to the source.
+                        setExpandedSources((prev) => {
+                          const next = new Set(prev);
+                          next.add(msg.id);
+                          return next;
+                        });
+                        // Wait a frame so the panel exists in the DOM.
+                        requestAnimationFrame(() => {
+                          const el = document.getElementById(
+                            `source-${msg.id}-${n}`
+                          );
+                          el?.scrollIntoView({ behavior: "smooth", block: "center" });
+                          el?.classList.add("source-card--flash");
+                          setTimeout(
+                            () => el?.classList.remove("source-card--flash"),
+                            1200
+                          );
+                        });
+                      }}
+                    />
+                    {msg.isStreaming && (
+                      <span className="inline-block w-2 h-4 bg-accent/70 ml-0.5 animate-pulse rounded-sm" />
+                    )}
                   </div>
+
+                  {/* Source Citations */}
+                  {msg.sources && msg.sources.length > 0 && !msg.isStreaming && (
+                    <div className="mt-3">
+                      <button
+                        onClick={() => toggleSources(msg.id)}
+                        className="sources-toggle"
+                      >
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 12 12"
+                          fill="none"
+                          className={`transition-transform duration-200 ${
+                            expandedSources.has(msg.id) ? "rotate-90" : ""
+                          }`}
+                        >
+                          <path
+                            d="M4.5 2.5L8 6L4.5 9.5"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                        <span>
+                          {msg.sources.length} source{msg.sources.length !== 1 ? "s" : ""}
+                        </span>
+                      </button>
+
+                      {expandedSources.has(msg.id) && (
+                        <div className="sources-panel">
+                          {msg.sources.map((src) => (
+                            <div
+                              key={src.chunk_id}
+                              id={`source-${msg.id}-${src.chunk_id}`}
+                              className="source-card"
+                            >
+                              <div className="source-header">
+                                <span className="source-badge">
+                                  [{src.chunk_id}]
+                                </span>
+                                <span className="source-title">
+                                  {src.document_title || "Unknown source"}
+                                </span>
+                                <span className="source-score">
+                                  {(src.score * 100).toFixed(0)}% match
+                                </span>
+                              </div>
+                              {src.source_type && (
+                                <span className="source-type">
+                                  {src.source_type}
+                                </span>
+                              )}
+                              <p className="source-text">{src.text}</p>
+
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
 
-            {/* Typing Indicator */}
-            {isLoading && (
-              <div className="flex gap-3">
-                <div className="w-7 h-7 rounded-full bg-surface flex items-center justify-center flex-shrink-0 text-xs">
-                  🩻
-                </div>
-                <div className="pt-2">
-                  <div className="flex gap-1">
-                    <span className="w-2 h-2 bg-foreground-muted rounded-full dot-1" />
-                    <span className="w-2 h-2 bg-foreground-muted rounded-full dot-2" />
-                    <span className="w-2 h-2 bg-foreground-muted rounded-full dot-3" />
+            {/* Typing Indicator (only when waiting for first token) */}
+            {isLoading &&
+              messages.length > 0 &&
+              messages[messages.length - 1].role === "assistant" &&
+              messages[messages.length - 1].content === "" &&
+              !messages[messages.length - 1].isError && (
+                <div className="flex gap-3 -mt-4">
+                  <div className="w-7 h-7" /> {/* spacer to align with avatar */}
+                  <div className="pt-0">
+                    <div className="flex gap-1 items-center text-xs text-foreground-muted">
+                      <div className="flex gap-1 mr-2">
+                        <span className="w-1.5 h-1.5 bg-foreground-muted rounded-full dot-1" />
+                        <span className="w-1.5 h-1.5 bg-foreground-muted rounded-full dot-2" />
+                        <span className="w-1.5 h-1.5 bg-foreground-muted rounded-full dot-3" />
+                      </div>
+                      Searching knowledge base...
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
 
             <div ref={messagesEndRef} />
           </div>
@@ -151,6 +653,30 @@ export default function ChatPage() {
               rows={1}
               className="flex-1 bg-transparent text-sm text-foreground placeholder:text-foreground-muted resize-none outline-none max-h-[200px]"
             />
+
+            {/* Audience Toggle */}
+            <div className="audience-toggle flex-shrink-0">
+              <button
+                onClick={() => setAudience("radiologist")}
+                className={`audience-option ${
+                  audience === "radiologist" ? "active" : ""
+                }`}
+                title="Concise responses with standard terminology"
+              >
+                Attending
+              </button>
+              <button
+                onClick={() => setAudience("resident")}
+                className={`audience-option ${
+                  audience === "resident" ? "active" : ""
+                }`}
+                title="Step-by-step reasoning, defines terms"
+              >
+                Resident
+              </button>
+            </div>
+
+            {/* Send Button */}
             <button
               onClick={handleSend}
               disabled={!input.trim() || isLoading}
@@ -175,7 +701,8 @@ export default function ChatPage() {
             </button>
           </div>
           <p className="text-[10px] text-foreground-muted text-center mt-2">
-            RadAssist AI is a decision-support tool. Always verify AI suggestions before clinical use.
+            RadAssist AI is a decision-support tool. Always verify AI
+            suggestions before clinical use.
           </p>
         </div>
       </div>

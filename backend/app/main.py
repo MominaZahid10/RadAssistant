@@ -39,6 +39,7 @@ from app.core.database import engine, Base
 from app.models import Document  # noqa: F401 — Import so SQLAlchemy discovers it
 from app.services.embedding import embedding_service
 from app.services.qdrant_service import qdrant_service
+from app.services.llm_service import llm_service
 
 settings = get_settings()
 
@@ -88,8 +89,18 @@ async def lifespan(app: FastAPI):
         model_info = embedding_service.get_info()
         print(f"✅ Embedding model ready: {model_info['model_name']} ({model_info['dimension']}D)")
     except Exception as e:
-        print(f"⚠️  Embedding model failed to load: {e}")
-        print("   Knowledge base ingestion and search will not work.")
+        print("=" * 50)
+        print(f"❌ EMBEDDING MODEL FAILED TO LOAD: {e}")
+        print("")
+        print("   ALL ingestion and search will fail until this is fixed.")
+        print("   Documents will be accepted and then marked 'failed'.")
+        print("")
+        print("   Most likely cause: the model cache was wiped (e.g. by")
+        print("   `docker-compose down -v`) while HF_HUB_OFFLINE=1 prevents")
+        print("   re-downloading it.")
+        print("")
+        print("   Fix:  HF_HUB_OFFLINE=0 docker-compose up -d backend")
+        print("=" * 50)
     
     # ── Phase 2: Qdrant Collection ───────────────────────────
     # Create the vector collection if it doesn't exist.
@@ -104,7 +115,32 @@ async def lifespan(app: FastAPI):
     # Create the directory where uploaded files are temporarily saved.
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     print(f"✅ Upload directory ready: {settings.UPLOAD_DIR}")
-    
+
+    # ── Phase 3: LLM Provider ────────────────────────────────
+    # Report which providers have keys. We deliberately do NOT make a live
+    # API call here: it would add latency to every container start, cost
+    # tokens on each restart, and fight with Docker healthchecks. The real
+    # connectivity test lives behind GET /api/v1/health, which you can call
+    # on demand.
+    info = llm_service.get_provider_info()
+    configured = [n for n, p in info["providers"].items() if p["configured"]]
+
+    if configured:
+        print(
+            f"✅ LLM ready: {info['active_provider']} / {info['active_model']}"
+        )
+        fallbacks = [n for n in configured if n != info["active_provider"]]
+        if fallbacks:
+            print(f"   Fallback providers available: {', '.join(fallbacks)}")
+        if info["active_provider"] not in configured:
+            print(
+                f"⚠️  LLM_PROVIDER is '{info['active_provider']}' but it has no "
+                f"API key — requests will fall back to: {', '.join(configured)}"
+            )
+    else:
+        print("⚠️  No LLM provider configured — /api/v1/chat will return 503")
+        print("   Set GROQ_API_KEY, MISTRAL_API_KEY, or OPENAI_API_KEY in .env")
+
     print("=" * 50)
     print(f"🟢 {settings.APP_NAME} is ready!")
     print(f"   Docs:   http://localhost:8000/docs")

@@ -20,3 +20,12 @@ from app.schemas.document import (  # noqa: F401
     SearchResponse,
     KnowledgeBaseStats,
 )
+
+from app.schemas.rag import (  # noqa: F401  — Phase 3
+    Audience,
+    ChatRequest,
+    ChatResponse,
+    SourceReference,
+    ProviderInfo,
+    ModelInfoResponse,
+)

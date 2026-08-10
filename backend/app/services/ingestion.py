@@ -54,6 +54,7 @@ STAGE 4 — STORE:
 """
 
 import io
+import re
 import traceback
 
 import fitz  # PyMuPDF — imported as 'fitz' (historical name)
@@ -406,6 +407,41 @@ def chunk_text(
     return chunks
 
 
+def _tail_overlap(text: str, chunk_overlap: int) -> str:
+    """
+    Take the last `chunk_overlap` characters of `text`, snapped forward to the
+    nearest word boundary.
+
+    WHY THE SNAP MATTERS:
+    A naive `text[-chunk_overlap:]` slices blindly by character count, so a
+    chunk can begin mid-word. Real example from the seeded knowledge base,
+    where "...must not be missed on chest imaging" became:
+
+        "e missed on chest imaging.\\n\\nTypes of Pneumothorax:..."
+
+    Two concrete costs:
+      1. The orphaned "e" is tokenised as a meaningless fragment, adding noise
+         to a 384-dimensional vector that should represent medical meaning.
+      2. These chunks are shown verbatim to the radiologist as the evidence
+         behind a generated finding. A citation that opens mid-word reads as
+         broken software, which is corrosive for a clinical decision-support
+         tool whose entire value proposition is traceable, trustworthy sources.
+
+    If the window contains no whitespace at all (one very long token, e.g. a
+    chemical name or an OCR artefact), the raw slice is returned — trimming to
+    nothing would lose the overlap entirely.
+    """
+    window = text[-chunk_overlap:]
+
+    match = re.search(r"\s", window)
+    if match is None:
+        return window  # No boundary available; keep the raw slice.
+
+    snapped = window[match.end():].lstrip()
+    # If snapping consumed everything meaningful, fall back to the raw window.
+    return snapped if snapped else window
+
+
 def _recursive_split(
     text: str,
     separators: list[str],
@@ -458,8 +494,7 @@ def _recursive_split(
                 
                 # Start new chunk with overlap from previous chunk
                 if chunk_overlap > 0 and len(current_chunk) > chunk_overlap:
-                    # Take the last 'overlap' characters as the start of next chunk
-                    overlap_text = current_chunk[-chunk_overlap:]
+                    overlap_text = _tail_overlap(current_chunk, chunk_overlap)
                     current_chunk = overlap_text + separator + piece
                 else:
                     current_chunk = piece
@@ -648,6 +683,27 @@ async def _chunk_embed_store(
     We do the whole chunk+embed+store block in ONE thread hop rather than
     three, to avoid paying the context-switch cost repeatedly.
     """
+
+    # ⚠️  Fail fast with a diagnosis, not a generic error.
+    # If the embedding model didn't load at startup, EVERY document will fail.
+    # Previously each one recorded "Internal error during ingestion: ..." with
+    # the raw HuggingFace exception, which gave no hint that the real problem
+    # was a missing model cache. Naming the cause once, clearly, turns a
+    # baffling "34 documents failed" into an actionable message.
+    if not embedding_service.is_loaded:
+        msg = (
+            "The embedding model is not loaded, so nothing can be indexed. "
+            "This usually means the model cache was deleted (e.g. by "
+            "`docker-compose down -v`) while HF_HUB_OFFLINE=1 blocked "
+            "re-downloading it. Fix: HF_HUB_OFFLINE=0 docker-compose up -d backend"
+        )
+        print(f"❌ {label}: {msg}")
+        return {
+            "status": "failed",
+            "chunk_count": 0,
+            "char_count": len(text),
+            "message": msg,
+        }
 
     def _blocking_work() -> tuple[list[str], int]:
         # ── STAGE 2: Chunk ──

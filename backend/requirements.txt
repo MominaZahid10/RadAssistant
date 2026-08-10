@@ -19,9 +19,10 @@ python-dotenv==1.0.1      # Load .env files into environment variables
 # ── Vector Database ───────────────────────────────────────────
 qdrant-client==1.10.0     # Client to talk to Qdrant vector database
 
-# ── LLM Providers (will be used in Phase 3+) ─────────────────
-# mistralai             # Uncomment when we reach Phase 3
-# openai                # Uncomment when we reach Phase 3
+# ── LLM Providers (Phase 3) ───────────────────────────────
+groq==0.9.0               # Groq API client — free tier, fast inference
+mistralai==1.2.5           # Mistral AI client (v2 SDK) — quality models
+openai==1.40.0            # OpenAI client — production provider
 
 # ── Document Processing (Phase 2) ────────────────────────────
 pymupdf==1.24.0           # PDF text extraction — fastest Python PDF lib (C-based MuPDF engine)
@@ -31,7 +32,23 @@ pytesseract==0.3.13       # OCR — extract text from images (uses Tesseract eng
 
 # ── Embeddings (Phase 2) ─────────────────────────────────────
 sentence-transformers==3.0.1  # Load & run embedding models (all-MiniLM-L6-v2)
-                              # Automatically installs torch, transformers, etc.
+
+# ⚠️  TORCH IS INSTALLED SEPARATELY — see backend/Dockerfile.
+# The Dockerfile installs the CPU-only wheel from PyTorch's CPU index BEFORE
+# this file is processed. Without that, pip resolves the default CUDA build and
+# downloads 3-5 GB of NVIDIA libraries we never use.
+#
+# Running OUTSIDE Docker? Install torch first, the same way:
+#   pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+torch==2.4.1
+
+# These are transitive deps of sentence-transformers that it does NOT pin.
+# Left unpinned, pip resolves whatever is newest — which is how this build
+# ended up on torch 2.13 + transformers 4.57 + numpy 2.5, a combination nobody
+# has tested together. Pinning them makes builds reproducible.
+transformers==4.44.2
+numpy==1.26.4
 
 # ── File Upload Support ──────────────────────────────────────
 python-multipart==0.0.9   # Required by FastAPI to accept file uploads (multipart/form-data)

@@ -31,12 +31,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Install CPU-only PyTorch FIRST ───────────────────────────
+# ⚠️  WHY THIS STEP EXISTS — READ BEFORE REMOVING:
+#
+# sentence-transformers depends on torch but does not pin it. On PyPI the
+# default `torch` wheel is the CUDA build, so a plain
+# `pip install -r requirements.txt` drags in the entire NVIDIA stack:
+#   nvidia-cublas, nvidia-cudnn, nvidia-nccl, nvidia-cusparselt,
+#   nvidia-nvshmem, triton, cuda-toolkit, cuda-bindings ...
+# That's 3-5 GB of GPU libraries downloaded into a container that will only
+# ever run inference on CPU. It bloats the image ~6x and makes builds fail on
+# anything less than a fast connection.
+#
+# Installing the CPU wheel from PyTorch's dedicated CPU index first means torch
+# is already satisfied by the time pip reads requirements.txt, so the CUDA
+# variant is never considered.
+#
+# --timeout/--retries: PyPI reads can stall on slow links; without these a
+# single hiccup fails the whole build after ten minutes of downloading.
+RUN pip install --no-cache-dir --timeout 180 --retries 10 \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.4.1
+
 # ── Install Python dependencies ──────────────────────────────
 # TRICK: Copy requirements.txt FIRST, then install.
 # Docker caches each step. If requirements.txt hasn't changed,
 # Docker skips reinstalling (saves minutes on rebuilds).
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --timeout 180 --retries 10 -r requirements.txt
 
 # ── Copy application code ────────────────────────────────────
 COPY . .

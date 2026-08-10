@@ -63,13 +63,35 @@ class Settings(BaseSettings):
     QDRANT_HOST: str = "qdrant"
     QDRANT_PORT: int = 6333
 
-    # ── LLM Configuration ────────────────────────────────────
-    # We use Mistral for dev/testing, OpenAI for final testing.
+    # ── LLM Configuration (Phase 3) ─────────────────────────
+    # Three providers, switchable via LLM_PROVIDER:
+    #   groq    — Free tier, fast inference (development default)
+    #   mistral — Free tier (limited), quality models (fallback)
+    #   openai  — Paid, highest quality (production)
+    #
+    # The service tries the primary provider first, then falls back
+    # through the others if the primary fails (rate limit, missing key).
+    GROQ_API_KEY: str = ""
     MISTRAL_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
-    
-    # Which LLM provider to use: "mistral" or "openai"
-    LLM_PROVIDER: str = "mistral"
+
+    # Which LLM provider to use: "groq", "mistral", or "openai"
+    LLM_PROVIDER: str = "groq"
+
+    # Model override — leave blank to auto-select per provider:
+    #   groq    → llama-3.3-70b-versatile
+    #   mistral → mistral-large-latest
+    #   openai  → gpt-4o-mini
+    LLM_MODEL: str = ""
+
+    # Temperature: 0.0–1.0.  Low = deterministic, factual.
+    # Clinical text shouldn't be creative, and low variance makes
+    # RAG evaluation (recall@5) reproducible across runs.
+    LLM_TEMPERATURE: float = 0.2
+
+    # Max tokens in the LLM response.  2048 ≈ ~1500 words — generous
+    # for a Q&A answer, tight enough to prevent runaway generation.
+    LLM_MAX_TOKENS: int = 2048
 
     # ── Embedding Model (Phase 2) ────────────────────────────
     # The embedding model converts text into vectors (lists of numbers).

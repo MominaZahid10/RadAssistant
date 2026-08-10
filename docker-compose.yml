@@ -92,10 +92,47 @@ services:
       - QDRANT_PORT=6333
       - DEBUG=true
       - UPLOAD_DIR=/app/uploads
+      # Python block-buffers stdout when it isn't a TTY, so print() output sits
+      # in a buffer while uvicorn's logger (which writes immediately) appears
+      # first. The result is a log where startup messages show up late or out
+      # of order — which made the app look hung on several occasions when it
+      # had actually started fine.
+      - PYTHONUNBUFFERED=1
+      # ── Load the embedding model from cache, don't phone home ──
+      # sentence-transformers checks HuggingFace for model updates on every
+      # startup. If HF is unreachable (offline, flaky DNS, corporate proxy) it
+      # retries 5x per file with backoff — roughly a minute of stalling before
+      # it gives up and uses the cached copy anyway. The result is a backend
+      # that looks hung and refuses connections on a cold start.
+      #
+      # Offline mode skips the check entirely and loads straight from the
+      # hf_cache volume: startup becomes fast and deterministic, and the app
+      # no longer has a runtime dependency on huggingface.co being up.
+      #
+      # ⚠️  Set to 0 the FIRST time you use a new EMBEDDING_MODEL, so it can
+      # actually be downloaded. Then set it back to 1.
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+      - TRANSFORMERS_OFFLINE=${HF_HUB_OFFLINE:-1}
+      # Default socket timeout is 10s, which is too aggressive on an unstable
+      # link — a connection that takes 7s to establish gets killed mid-download
+      # and the whole retry ladder restarts. Only relevant when
+      # HF_HUB_OFFLINE=0, i.e. the one time you populate the cache.
+      - HF_HUB_DOWNLOAD_TIMEOUT=60
+      - HF_HUB_ETAG_TIMEOUT=30
     volumes:
       - ./backend:/app             # Mount code for hot reload
       - uploads_data:/app/uploads  # Named volume so uploads don't land in your source tree
-      - hf_cache:/root/.cache/huggingface  # Persist the ~80MB embedding model between rebuilds
+      # ⚠️  BIND MOUNT, NOT A NAMED VOLUME — ON PURPOSE.
+      # This was a named volume, which `docker-compose down -v` destroys.
+      # Combined with HF_HUB_OFFLINE=1 that produced an unrecoverable state:
+      # the model was deleted, offline mode blocked re-downloading it, the
+      # app started anyway (model load failure is caught, not fatal), and then
+      # every ingestion silently failed — 34 documents, 0 chunks, no obvious
+      # cause.
+      #
+      # A host bind mount survives `down -v`, so wiping the databases no
+      # longer takes the model with it.
+      - ./backend/.hf_cache:/root/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy  # Wait for DB to be ready
@@ -115,6 +152,19 @@ services:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
+      # ── Make hot reload work through the bind mount ──
+      # Docker Desktop on Windows/macOS does NOT forward inotify filesystem
+      # events from the host into the container. The bind mount shows the
+      # updated file contents, but the watcher is never notified, so Next.js
+      # keeps serving the previously compiled bundle — edits appear to do
+      # nothing until you restart the container.
+      #
+      # Polling makes the watcher check timestamps on an interval instead of
+      # waiting for events. It costs a little CPU; it's the standard trade for
+      # Docker-on-Windows development.
+      - WATCHPACK_POLLING=true
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING_INTERVAL=1000
     volumes:
       - ./frontend/src:/app/src    # Mount src for hot reload
     depends_on:
@@ -127,4 +177,3 @@ volumes:
   postgres_data:
   qdrant_data:
   uploads_data:
-  hf_cache:

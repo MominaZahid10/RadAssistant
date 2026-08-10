@@ -99,10 +99,28 @@ def test_every_entry_has_source_attribution():
 
 def test_source_types_are_from_known_set():
     """Unknown source_types silently break the /stats breakdown and filters."""
-    known = {"textbook", "guideline", "report", "research_paper",
-             "statpearls", "clinical_note", "curated", "general"}
+    known = {
+        "curated_summary",   # written-to-reflect content, no PMID/DOI
+        "pmc_open_access",   # full text from PMC, verifiable
+        "statpearls",        # NCBI abstracts, verifiable
+        "textbook", "guideline", "report", "research_paper",
+        "clinical_note", "curated", "general",
+    }
     for entry in SEED_KNOWLEDGE:
         assert entry["source_type"] in known, (
             f"'{entry['title']}' has unexpected source_type "
             f"'{entry['source_type']}'"
         )
+
+
+def test_curated_content_is_not_labelled_as_a_primary_source():
+    """
+    These entries are summaries written to reflect their named sources — they
+    contain no PMID, DOI or URL, so nothing in them can be traced to a page or
+    paper. Labelling them "textbook" or "guideline" in the evidence panel
+    would tell a radiologist they're reading a primary source when they are
+    not. Verifiable content comes from the PMC/StatPearls ingestion instead.
+    """
+    overstated = {"textbook", "guideline", "research_paper", "statpearls"}
+    wrong = [e["title"] for e in SEED_KNOWLEDGE if e["source_type"] in overstated]
+    assert not wrong, f"curated summaries mislabelled as primary sources: {wrong}"

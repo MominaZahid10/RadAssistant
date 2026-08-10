@@ -82,7 +82,12 @@ class EmbeddingService:
         if self._loaded:
             return
 
-        print(f"📦 Loading embedding model: {self.model_name}...")
+        import os
+
+        offline = os.getenv("HF_HUB_OFFLINE", "0") in ("1", "true", "True")
+        mode = "offline, from cache" if offline else "online"
+        print(f"📦 Loading embedding model: {self.model_name} ({mode})...")
+
         try:
             self.model = SentenceTransformer(self.model_name)
             # Get the actual dimension from the model (verify config matches)
@@ -96,7 +101,21 @@ class EmbeddingService:
             self._loaded = True
             print(f"✅ Embedding model loaded: {self.model_name} ({self.dimension}D)")
         except Exception as e:
-            print(f"❌ Failed to load embedding model: {e}")
+            print(f"❌ Failed to load embedding model '{self.model_name}': {e}")
+            if offline:
+                # The most likely cause, and the error text from huggingface_hub
+                # doesn't make it obvious.
+                print(
+                    "   HF_HUB_OFFLINE=1 is set, so no download was attempted.\n"
+                    "   If this is a model you haven't used before, start once with\n"
+                    "   HF_HUB_OFFLINE=0 to populate the cache:\n"
+                    "       HF_HUB_OFFLINE=0 docker-compose up -d backend"
+                )
+            else:
+                print(
+                    "   Could not reach huggingface.co. Check container DNS:\n"
+                    "       docker-compose exec backend getent hosts huggingface.co"
+                )
             raise
 
     def encode(

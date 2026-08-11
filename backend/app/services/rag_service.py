@@ -54,6 +54,7 @@ from app.services.embedding import embedding_service
 from app.services.qdrant_service import qdrant_service
 from app.services.llm_service import llm_service
 from app.services.reranker import reranker_service
+from app.services.lexical_service import lexical_index
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -241,6 +242,10 @@ class RetrievedChunk:
     # Cross-encoder relevance (Phase 3.5). Unbounded logit, ordering only —
     # never render this as a percentage. `score` stays the cosine value.
     rerank_score: float | None = None
+    # Qdrant point id — used to dedupe vector and lexical candidates.
+    point_id: str | None = None
+    # BM25 score when this chunk came from lexical retrieval.
+    bm25_score: float | None = None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -427,6 +432,8 @@ class RAGResult:
 
 
 class RAGService:
+    _last_query_vector: list[float] | None = None
+
     """
     Orchestrates the full Retrieval-Augmented Generation pipeline.
 
@@ -459,6 +466,9 @@ class RAGService:
         """
         # Embed the query using the same model that embedded the documents.
         query_vector = embedding_service.encode_single(query)
+        # Retained so lexical-only hits can be given a real cosine score
+        # instead of a meaningless BM25 logit in the evidence panel.
+        self._last_query_vector = query_vector
 
         # Search Qdrant.
         raw_results = qdrant_service.search(
@@ -481,6 +491,7 @@ class RAGService:
                 document_title=result.get("title") or result.get("filename"),
                 source_type=result.get("source_type"),
                 chunk_index=result.get("chunk_index"),
+                point_id=result.get("point_id"),
             ))
 
         return chunks
@@ -507,15 +518,21 @@ class RAGService:
         happens on every single chat message rather than on occasional uploads,
         so under any concurrency it serialises the whole application.
         """
-        # ── Stage 1: vector search for RECALL ──
-        # Deliberately over-fetch. Cheap, and the precision stage below is
-        # what decides what actually reaches the model.
+        # ── Stage 1: RECALL — vector + lexical, unioned ──
+        # Two retrievers with near-orthogonal failure modes. Embeddings find
+        # passages that are ABOUT the topic; BM25 finds passages containing
+        # the exact terms. Measured need: the chunk answering "radiographic
+        # findings of pneumothorax" was never in the vector candidate pool,
+        # so reranking could not reach it.
         n_candidates = max(
             settings.RERANK_CANDIDATES if settings.RERANK_ENABLED else limit * _OVERFETCH_FACTOR,
             limit,
         )
         candidates = await run_in_threadpool(
             self._retrieve_sync, query, n_candidates, source_type
+        )
+        candidates = await self._add_lexical_candidates(
+            query, candidates, source_type
         )
         if not candidates:
             return []
@@ -536,6 +553,77 @@ class RAGService:
 
         # Collapse overlapping neighbours before the LLM ever sees them.
         return merge_adjacent_chunks(diverse)
+
+    async def _add_lexical_candidates(
+        self,
+        query: str,
+        vector_hits: list[RetrievedChunk],
+        source_type: str | None,
+    ) -> list[RetrievedChunk]:
+        """
+        Union BM25 hits into the candidate pool, deduplicated by point ID.
+
+        Order is irrelevant here — the cross-encoder rescores everything
+        afterwards. The only job of this stage is to make sure the answering
+        chunk is *present* to be scored.
+
+        Returns `vector_hits` unchanged if hybrid retrieval is disabled or the
+        index is unavailable. Never raises: lexical retrieval is an
+        enhancement, and losing it must not break search.
+        """
+        if not settings.HYBRID_ENABLED:
+            return vector_hits
+
+        def _lexical_work() -> list[RetrievedChunk]:
+            # Build (or rebuild after ingestion) on first use.
+            if not lexical_index.is_built:
+                records = qdrant_service.iter_all_chunks()
+                if not records:
+                    return []
+                lexical_index.build(records)
+
+            hits = lexical_index.search(query, limit=settings.LEXICAL_CANDIDATES)
+            if source_type:
+                hits = [h for h in hits if h.get("source_type") == source_type]
+            if not hits:
+                return []
+
+            seen = {c.point_id for c in vector_hits if c.point_id}
+            new = [h for h in hits if h.get("point_id") not in seen]
+            if not new:
+                return []
+
+            # Lexical-only hits have no cosine score, but the evidence panel
+            # displays one. Fetch the stored vectors and compute the real
+            # value rather than showing a BM25 logit as a "% match".
+            cosines = qdrant_service.cosine_scores_for_points(
+                [h["point_id"] for h in new], self._last_query_vector or []
+            )
+
+            return [
+                RetrievedChunk(
+                    chunk_id=0,                     # renumbered after reranking
+                    text=h["text"],
+                    score=cosines.get(h["point_id"], 0.0),
+                    document_id=h.get("document_id"),
+                    document_title=h.get("title") or h.get("filename"),
+                    source_type=h.get("source_type"),
+                    chunk_index=h.get("chunk_index"),
+                    point_id=h.get("point_id"),
+                    bm25_score=h.get("bm25_score"),
+                )
+                for h in new
+            ]
+
+        try:
+            extra = await run_in_threadpool(_lexical_work)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Lexical retrieval failed, using vector only: %s", e)
+            return vector_hits
+
+        if extra:
+            logger.debug("Lexical added %d candidates beyond vector search", len(extra))
+        return vector_hits + extra
 
     async def _rerank(
         self,

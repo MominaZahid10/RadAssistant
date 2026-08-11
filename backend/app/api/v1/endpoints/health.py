@@ -28,6 +28,7 @@ from app.services.embedding import embedding_service
 from app.services.qdrant_service import qdrant_service
 from app.services.llm_service import llm_service
 from app.services.reranker import reranker_service
+from app.services.lexical_service import lexical_index
 
 router = APIRouter()
 settings = get_settings()
@@ -66,6 +67,7 @@ async def health_check(verify_llm: bool = False):
             "qdrant": "checking...",
             "embedding_model": "checking...",
             "reranker": "checking...",
+            "lexical_index": "checking...",
             "llm": "checking...",
         }
     }
@@ -122,6 +124,17 @@ async def health_check(verify_llm: bool = False):
         )
     else:
         health["components"]["reranker"] = f"enabled, not yet loaded: {rr['model']}"
+
+    # ── Check the lexical index (Phase 3.6) ──────────────────
+    lx = lexical_index.get_info()
+    if not lx["enabled"]:
+        health["components"]["lexical_index"] = "disabled (HYBRID_ENABLED=false)"
+    elif lx["built"] and not lx["stale"]:
+        health["components"]["lexical_index"] = f"built: {lx['chunks']:,} chunks"
+    elif lx["stale"] and lx["built"]:
+        health["components"]["lexical_index"] = "stale — rebuilds on next search"
+    else:
+        health["components"]["lexical_index"] = "not yet built (lazy)"
 
     # ── Check the LLM provider (Phase 3) ─────────────────────
     # Config-only by default: reports whether a key exists, without spending

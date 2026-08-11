@@ -65,6 +65,7 @@ from PIL import Image
 from app.config import get_settings
 from app.services.embedding import embedding_service
 from app.services.qdrant_service import qdrant_service
+from app.services.lexical_service import lexical_index
 
 settings = get_settings()
 
@@ -705,6 +706,39 @@ async def _chunk_embed_store(
             "message": msg,
         }
 
+    def _contextualise(chunk: str) -> str:
+        """
+        Prefix a chunk with its document title before embedding.
+
+        ⚠️  MEASURED NEED — this is the fix for the last stubborn failure.
+        The chunk answering "What are the radiographic findings of
+        pneumothorax?" reads:
+
+            "CXR Findings of Pneumothorax: Visceral pleural line: A thin
+             white line separated from the chest wall..."
+
+        Neither retriever finds it. The embedding is dominated by "visceral
+        pleural line" — vocabulary that appears in the ANSWER but not the
+        QUESTION. BM25 fails for the same reason: the query terms
+        (radiographic, findings, pneumothorax) are common across 248 papers
+        that mention pneumothorax far more often.
+
+        Prefixing the title gives every chunk its document-level context:
+
+            "Pneumothorax — Types, Imaging, and Management. CXR Findings of
+             Pneumothorax: Visceral pleural line: ..."
+
+        Now the chunk itself contains "Pneumothorax", "Imaging" and
+        "Findings", so it matches the question on BOTH retrievers. A chunk
+        stripped of its source loses the very context that makes it findable.
+
+        The prefix is used for EMBEDDING AND BM25 ONLY. The evidence panel
+        still displays the original text — the title is already shown beside
+        it, and repeating it inside the excerpt would just be noise.
+        """
+        label = (metadata.get("title") or metadata.get("filename") or "").strip()
+        return f"{label}. {chunk}" if label else chunk
+
     def _blocking_work() -> tuple[list[str], int]:
         # ── STAGE 2: Chunk ──
         print(f"✂️  Chunking (size={settings.CHUNK_SIZE}, overlap={settings.CHUNK_OVERLAP})...")
@@ -714,9 +748,10 @@ async def _chunk_embed_store(
         print(f"   → Created {len(chunks)} chunks")
 
         # ── STAGE 3: Embed ──
-        print(f"🧠 Embedding {len(chunks)} chunks...")
+        print(f"🧠 Embedding {len(chunks)} chunks (title-contextualised)...")
+        search_texts = [_contextualise(c) for c in chunks]
         vectors = embedding_service.encode(
-            chunks,
+            search_texts,
             batch_size=settings.EMBEDDING_BATCH_SIZE,
             show_progress=len(chunks) > 50,
         )
@@ -732,7 +767,12 @@ async def _chunk_embed_store(
             chunks=chunks,
             vectors=vectors,
             metadata=metadata,
+            search_texts=search_texts,
         )
+        # New chunks exist now, so the BM25 snapshot is out of date.
+        # The next lexical search rebuilds it.
+        lexical_index.mark_stale()
+
         return chunks, upserted
 
     try:
@@ -764,3 +804,60 @@ async def _chunk_embed_store(
         "char_count": len(text),
         "message": f"Successfully processed {len(chunks)} chunks from '{label}'",
     }
+
+
+# ══════════════════════════════════════════════════════════════
+# RE-INDEXING
+# ══════════════════════════════════════════════════════════════
+
+
+async def reindex_all_chunks(batch_size: int = 256) -> dict:
+    """
+    Re-embed every stored chunk with the current embedding strategy.
+
+    WHY IN-PLACE RATHER THAN RE-INGEST:
+    Re-ingesting means re-fetching 200+ articles from NCBI — the single most
+    failure-prone operation in this project on an unstable connection. The
+    text is already in Qdrant; only the vectors need to change. This reads,
+    re-embeds, and writes back under the same point IDs.
+
+    Applies the title-prefix contextualisation (see _contextualise) so
+    existing chunks gain the document context that new ingestions get
+    automatically.
+    """
+    def _work() -> dict:
+        records = qdrant_service.iter_all_chunks()
+        if not records:
+            return {"chunks": 0, "updated": 0, "message": "nothing to reindex"}
+
+        total = len(records)
+        print(f"🔁 Re-indexing {total:,} chunks with title context...")
+
+        updated = 0
+        for start in range(0, total, batch_size):
+            batch = records[start : start + batch_size]
+
+            # Prefix each chunk with its document title.
+            search_texts = []
+            for r in batch:
+                label = (r.get("title") or r.get("filename") or "").strip()
+                search_texts.append(f"{label}. {r['text']}" if label else r["text"])
+
+            vectors = embedding_service.encode(
+                search_texts, batch_size=settings.EMBEDDING_BATCH_SIZE
+            )
+
+            updated += qdrant_service.update_vectors(
+                point_ids=[r["point_id"] for r in batch],
+                vectors=vectors,
+                search_texts=search_texts,
+            )
+
+            done = min(start + batch_size, total)
+            print(f"   {done:,}/{total:,} ({100 * done // total}%)")
+
+        lexical_index.mark_stale()
+        print(f"✅ Re-index complete: {updated:,} chunks re-embedded")
+        return {"chunks": total, "updated": updated}
+
+    return await run_in_threadpool(_work)

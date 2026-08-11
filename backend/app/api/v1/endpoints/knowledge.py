@@ -667,6 +667,50 @@ async def fetch_pmc(
     }
 
 
+@router.post(
+    "/reindex",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Re-embed all chunks with title context",
+    description=(
+        "Re-embeds every stored chunk using the current embedding strategy, "
+        "without re-downloading anything.\n\n"
+        "Needed after changing how text is prepared for embedding — currently, "
+        "prefixing each chunk with its document title so the chunk carries its "
+        "own context into retrieval.\n\n"
+        "Reads existing chunks from Qdrant, re-embeds them, and writes the "
+        "vectors back under the same point IDs. No network, no re-fetch, and "
+        "PostgreSQL metadata is untouched.\n\n"
+        "Takes roughly 2-4 minutes for ~11,000 chunks on CPU."
+    ),
+)
+async def reindex(background_tasks: BackgroundTasks):
+    """
+    Re-embed the corpus in place.
+
+    WHY THIS EXISTS RATHER THAN "just re-ingest":
+    Re-ingesting means re-fetching 200+ articles from NCBI. On an unreliable
+    connection that's the single most failure-prone thing this project does,
+    and it isn't necessary — the text is already in Qdrant. Only the vectors
+    need to change.
+    """
+    _require_embedding_model()
+
+    async def _run() -> None:
+        from app.services.ingestion import reindex_all_chunks
+        try:
+            summary = await reindex_all_chunks()
+            print(f"🔁 Re-index complete: {summary}")
+        except Exception as e:  # noqa: BLE001
+            print(f"❌ Re-index failed: {e}")
+
+    background_tasks.add_task(_run)
+
+    return {
+        "message": "Re-indexing started in the background.",
+        "note": "Watch the backend logs for progress; search stays available throughout.",
+    }
+
+
 # ══════════════════════════════════════════════════════════════
 # STATS — Knowledge base overview
 # ══════════════════════════════════════════════════════════════

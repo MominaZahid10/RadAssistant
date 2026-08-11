@@ -157,6 +157,7 @@ class QdrantService:
         chunks: list[str],
         vectors: list[list[float]],
         metadata: dict | None = None,
+        search_texts: list[str] | None = None,
     ) -> int:
         """
         Store document chunks and their vectors in Qdrant.
@@ -194,10 +195,16 @@ class QdrantService:
             # When we search, Qdrant returns the matching payload,
             # so we can show the actual text and its source.
             payload = {
+                # Displayed verbatim in the evidence panel.
                 "text": chunk_text,
                 "document_id": str(document_id),
                 "chunk_index": i,
             }
+            # Title-prefixed variant, used for embedding and BM25 so a
+            # chunk carries its document context into retrieval. Never
+            # shown to the user — see _contextualise() in ingestion.py.
+            if search_texts and i < len(search_texts):
+                payload["search_text"] = search_texts[i]
             # Merge any extra metadata (filename, source_type, etc.)
             if metadata:
                 payload.update(metadata)
@@ -288,6 +295,7 @@ class QdrantService:
                 "filename": hit.payload.get("filename"),
                 "source_type": hit.payload.get("source_type"),
                 "chunk_index": hit.payload.get("chunk_index"),
+                "point_id": str(hit.id),
             }
             for hit in response.points
         ]
@@ -362,6 +370,135 @@ class QdrantService:
                 "error": str(e),
                 "status": "error",
             }
+
+    def update_vectors(
+        self,
+        point_ids: list[str],
+        vectors: list[list[float]],
+        search_texts: list[str] | None = None,
+    ) -> int:
+        """
+        Replace the vectors (and optionally search_text) of existing points.
+
+        Used by re-indexing: the chunk text and all metadata stay exactly as
+        they are, only the embedding changes. Far cheaper and far less
+        failure-prone than deleting and re-ingesting from source.
+        """
+        if not point_ids or not vectors:
+            return 0
+
+        try:
+            self.client.update_vectors(
+                collection_name=self.collection_name,
+                points=[
+                    qdrant_models.PointVectors(id=pid, vector=vec)
+                    for pid, vec in zip(point_ids, vectors)
+                ],
+            )
+            if search_texts:
+                self.client.set_payload(
+                    collection_name=self.collection_name,
+                    payload={},
+                    points=point_ids,
+                )
+                # Per-point payload, so set them individually in one batch call.
+                for pid, st in zip(point_ids, search_texts):
+                    self.client.set_payload(
+                        collection_name=self.collection_name,
+                        payload={"search_text": st},
+                        points=[pid],
+                    )
+            return len(point_ids)
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  update_vectors failed for {len(point_ids)} points: {e}")
+            return 0
+
+    def iter_all_chunks(self, batch_size: int = 512) -> list[dict]:
+        """
+        Return every chunk's payload — used to build the BM25 lexical index.
+
+        Scrolls the whole collection with `with_vectors=False`, so this moves
+        text and metadata only. At ~10,500 chunks that's a few megabytes and
+        takes a second or two; it runs once at first lexical search and again
+        only after ingestion marks the index stale.
+        """
+        out: list[dict] = []
+        next_page = None
+
+        try:
+            while True:
+                points, next_page = self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=batch_size,
+                    offset=next_page,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for p in points:
+                    payload = p.payload or {}
+                    if not payload.get("text"):
+                        continue
+                    out.append({
+                        "point_id": str(p.id),
+                        "text": payload["text"],
+                        "search_text": payload.get("search_text") or payload["text"],
+                        "document_id": payload.get("document_id"),
+                        "title": payload.get("title"),
+                        "filename": payload.get("filename"),
+                        "source_type": payload.get("source_type"),
+                        "chunk_index": payload.get("chunk_index"),
+                    })
+                if next_page is None:
+                    break
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  Could not read chunks for the lexical index: {e}")
+            return out
+
+        return out
+
+    def cosine_scores_for_points(
+        self,
+        point_ids: list[str],
+        query_vector: list[float],
+    ) -> dict[str, float]:
+        """
+        Cosine similarity between `query_vector` and specific stored points.
+
+        WHY THIS IS NEEDED:
+        Chunks found only by BM25 have no cosine score, but the evidence panel
+        displays one ("74% match"). Showing a BM25 logit there would be
+        meaningless and inconsistent with vector-retrieved neighbours, so we
+        fetch the stored vectors and compute the real cosine.
+
+        Vectors are stored L2-normalised (normalize_embeddings=True at
+        ingestion) and the query vector likewise, so the dot product IS the
+        cosine — no division needed.
+        """
+        if not point_ids:
+            return {}
+
+        try:
+            points = self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=point_ids,
+                with_vectors=True,
+                with_payload=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  Could not fetch vectors for lexical hits: {e}")
+            return {}
+
+        scores: dict[str, float] = {}
+        for p in points:
+            vec = p.vector
+            if isinstance(vec, dict):          # named-vector collections
+                vec = next(iter(vec.values()), None)
+            if not vec:
+                continue
+            scores[str(p.id)] = round(
+                sum(a * b for a, b in zip(query_vector, vec)), 4
+            )
+        return scores
 
     def get_chunks_by_document(
         self,

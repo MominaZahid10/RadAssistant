@@ -135,6 +135,16 @@ class Settings(BaseSettings):
     # three evaluation questions retrieve the correct document at rank 1 and
     # STILL miss the answering passage, because it's that document's 4th-best
     # chunk. Diversity and depth trade directly against each other here.
+    # ── Hybrid retrieval (Phase 3.6) ─────────────────────────
+    # BM25 lexical search unioned with vector search before reranking.
+    # Measured need: the chunk answering "radiographic findings of
+    # pneumothorax" exists in the corpus and never entered the vector
+    # candidate pool, so the cross-encoder could not reach it. Embeddings
+    # find passages ABOUT a topic; BM25 finds passages CONTAINING the
+    # exact terms. Their failure modes are near-orthogonal.
+    HYBRID_ENABLED: bool = True
+    LEXICAL_CANDIDATES: int = 20
+
     RETRIEVAL_LIMIT: int = 12
     MAX_CHUNKS_PER_DOCUMENT: int = 3
 

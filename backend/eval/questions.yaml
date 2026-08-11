@@ -1,0 +1,247 @@
+# ══════════════════════════════════════════════════════════════
+# RadAssist AI — Retrieval Evaluation Set
+# ══════════════════════════════════════════════════════════════
+#
+# A fixed set of questions with expected evidence, so retrieval changes can be
+# measured instead of guessed at.
+#
+# WHY TWO KINDS OF EXPECTATION:
+#
+#   expect_sources   — document titles that SHOULD be retrieved.
+#                      Precise, but brittle: the PMC corpus changes every time
+#                      you re-run fetch-pmc, so titles come and go.
+#
+#   expect_keywords  — phrases that should appear in the retrieved TEXT.
+#                      Survives corpus churn, and tests what actually matters:
+#                      did we surface a passage containing the answer?
+#
+# A question passes on keywords even if the exact source document changed,
+# which keeps the harness useful as the knowledge base grows.
+#
+# CATEGORIES — these fail differently, so they're scored separately:
+#
+#   definitional  "what does X look like" — the failure mode found in Phase 3,
+#                 where term-dense research papers outrank explanatory content
+#   criteria      precise thresholds and numbers
+#   comparative   requires synthesising more than one source
+#   refuse        must NOT be answered — guardrail check
+#
+# ADDING QUESTIONS: keep keywords lowercase and distinctive. Avoid words that
+# appear everywhere ("imaging", "patient") — they'd pass trivially.
+
+questions:
+
+  # ══════════════════════════════════════════════════════════
+  # DEFINITIONAL — "what does this look like on imaging?"
+  # ══════════════════════════════════════════════════════════
+
+  - id: pneumothorax_findings
+    category: definitional
+    question: "What are the radiographic findings of pneumothorax?"
+    expect_sources:
+      - "Pneumothorax"
+    expect_keywords:
+      - "visceral pleural line"
+      - "absent lung markings"
+    should_answer: true
+    # ⚠️  THE REGRESSION CASE. At 232 documents this returned papers on
+    # liposuction complications and ML detection, and the model refused.
+    # If this passes, the Phase 3 defect is fixed.
+
+  - id: tension_pneumothorax
+    category: definitional
+    question: "How does tension pneumothorax appear on chest X-ray?"
+    expect_sources:
+      - "Pneumothorax"
+    expect_keywords:
+      - "mediastinal shift"
+      - "hemidiaphragm"
+    should_answer: true
+
+  - id: pneumonia_pattern
+    category: definitional
+    question: "What is the radiographic pattern of lobar pneumonia?"
+    expect_sources:
+      - "Pneumonia"
+    expect_keywords:
+      - "consolidation"
+      - "air bronchogram"
+    should_answer: true
+
+  - id: pleural_effusion_signs
+    category: definitional
+    question: "What are the earliest signs of pleural effusion on an erect chest radiograph?"
+    expect_sources:
+      - "Pleural Effusion"
+    expect_keywords:
+      - "costophrenic"
+    should_answer: true
+
+  - id: pe_ctpa
+    category: definitional
+    question: "What findings indicate pulmonary embolism on CT pulmonary angiography?"
+    expect_sources:
+      - "Pulmonary Embolism"
+    expect_keywords:
+      - "filling defect"
+    should_answer: true
+
+  - id: stroke_early_ct
+    category: definitional
+    question: "What are the early CT signs of acute ischaemic stroke?"
+    expect_sources:
+      - "Acute Stroke"
+    expect_keywords:
+      - "hyperdense"
+    should_answer: true
+
+  - id: cxr_systematic
+    category: definitional
+    question: "What is a systematic approach to reading a chest X-ray?"
+    expect_sources:
+      - "Systematic Approach to Chest X-Ray"
+    expect_keywords:
+      - "airway"
+      - "diaphragm"
+    should_answer: true
+
+  - id: efast_trauma
+    category: definitional
+    question: "What does an eFAST scan assess in trauma?"
+    expect_sources:
+      - "Trauma Imaging"
+    expect_keywords:
+      - "efast"
+    should_answer: true
+
+  # ══════════════════════════════════════════════════════════
+  # CRITERIA — precise numbers and named guidelines
+  # ══════════════════════════════════════════════════════════
+
+  - id: fleischner_nodule
+    category: criteria
+    question: "What do the Fleischner Society guidelines recommend for a solid pulmonary nodule?"
+    expect_sources:
+      - "Lung Nodules"
+    expect_keywords:
+      - "fleischner"
+    should_answer: true
+
+  - id: cardiothoracic_ratio
+    category: criteria
+    question: "What cardiothoracic ratio indicates cardiomegaly, and on which view?"
+    expect_sources:
+      - "Systematic Approach to Chest X-Ray"
+    expect_keywords:
+      - "cardiothoracic ratio"
+    should_answer: true
+
+  - id: adequacy_criteria
+    category: criteria
+    question: "How do you assess whether a chest radiograph is technically adequate?"
+    expect_sources:
+      - "Systematic Approach to Chest X-Ray"
+    expect_keywords:
+      - "rotation"
+      - "inspiration"
+    should_answer: true
+
+  - id: contrast_reaction
+    category: criteria
+    question: "How should a severe iodinated contrast reaction be managed?"
+    expect_sources:
+      - "Contrast Media"
+    expect_keywords:
+      - "contrast"
+    should_answer: true
+
+  - id: ett_position
+    category: criteria
+    question: "Where should the tip of an endotracheal tube sit on a chest radiograph?"
+    expect_sources:
+      - "Systematic Approach to Chest X-Ray"
+    expect_keywords:
+      - "carina"
+    should_answer: true
+
+  # ══════════════════════════════════════════════════════════
+  # COMPARATIVE — needs more than one source or section
+  # ══════════════════════════════════════════════════════════
+
+  - id: cardiogenic_vs_not
+    category: comparative
+    question: "How do cardiogenic and non-cardiogenic pulmonary oedema differ on imaging?"
+    expect_sources:
+      - "Pulmonary Edema"
+    expect_keywords:
+      - "cardiogenic"
+    should_answer: true
+
+  - id: ct_vs_cxr_pneumothorax
+    category: comparative
+    question: "Is CT or chest radiography more sensitive for detecting pneumothorax?"
+    expect_sources:
+      - "Pneumothorax"
+    expect_keywords:
+      - "occult"
+    should_answer: true
+
+  - id: modality_physics
+    category: comparative
+    question: "What is the difference between how CT and MRI generate images?"
+    expect_sources:
+      - "Imaging Modalities"
+    expect_keywords:
+      - "magnetic"
+    should_answer: true
+
+  - id: pneumothorax_mimics
+    category: comparative
+    question: "How can a skin fold be distinguished from a true pneumothorax?"
+    expect_sources:
+      - "Pneumothorax"
+    expect_keywords:
+      - "skin fold"
+    should_answer: true
+
+  - id: structured_reporting
+    category: comparative
+    question: "What are the benefits of structured radiology reporting over free text?"
+    expect_sources:
+      - "Structured Radiology Reporting"
+    expect_keywords:
+      - "structured"
+    should_answer: true
+
+  # ══════════════════════════════════════════════════════════
+  # REFUSE — the guardrail must hold
+  # ══════════════════════════════════════════════════════════
+  # These must NOT produce a confident answer. Two distinct mechanisms are
+  # being tested: the out-of-scope filter (obviously non-medical) and the
+  # relevance threshold (medical-sounding but absent from the corpus).
+
+  - id: refuse_weather
+    category: refuse
+    question: "What is the weather forecast for tomorrow?"
+    should_answer: false
+    expect_mechanism: out_of_scope
+
+  - id: refuse_recipe
+    category: refuse
+    question: "Give me a recipe for chocolate cake"
+    should_answer: false
+    expect_mechanism: out_of_scope
+
+  - id: refuse_soil
+    category: refuse
+    question: "What is the ideal soil pH for growing tomatoes in clay?"
+    should_answer: false
+    expect_mechanism: any
+
+  - id: refuse_offcorpus
+    category: refuse
+    question: "What is the recommended dosage of amoxicillin for paediatric otitis media?"
+    should_answer: false
+    expect_mechanism: relevance_threshold
+    # Medical, but nothing to do with radiology imaging — the corpus has no
+    # antibiotic dosing content, so the relevance gate should catch it.

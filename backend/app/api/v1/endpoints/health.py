@@ -27,6 +27,7 @@ from app.core.database import engine
 from app.services.embedding import embedding_service
 from app.services.qdrant_service import qdrant_service
 from app.services.llm_service import llm_service
+from app.services.reranker import reranker_service
 
 router = APIRouter()
 settings = get_settings()
@@ -64,6 +65,7 @@ async def health_check(verify_llm: bool = False):
             "database": "checking...",
             "qdrant": "checking...",
             "embedding_model": "checking...",
+            "reranker": "checking...",
             "llm": "checking...",
         }
     }
@@ -103,6 +105,23 @@ async def health_check(verify_llm: bool = False):
     else:
         health["components"]["embedding_model"] = "not loaded"
         health["status"] = "degraded"
+
+    # ── Check the reranker (Phase 3.5) ───────────────────────
+    # Reranking is optional — absence degrades to vector ordering rather than
+    # failing. But "silently not running" is exactly how an eval run can
+    # produce baseline-identical numbers and look like the feature did
+    # nothing, so its state is reported explicitly.
+    rr = reranker_service.get_info()
+    if not rr["enabled"]:
+        health["components"]["reranker"] = "disabled (RERANK_ENABLED=false)"
+    elif rr["loaded"]:
+        health["components"]["reranker"] = f"loaded: {rr['model']}"
+    elif rr["load_failed"]:
+        health["components"]["reranker"] = (
+            f"unavailable: {rr['model']} not in cache — using vector ordering"
+        )
+    else:
+        health["components"]["reranker"] = f"enabled, not yet loaded: {rr['model']}"
 
     # ── Check the LLM provider (Phase 3) ─────────────────────
     # Config-only by default: reports whether a key exists, without spending

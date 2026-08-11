@@ -49,10 +49,13 @@ from typing import AsyncIterator
 
 from fastapi.concurrency import run_in_threadpool
 
+from app.config import get_settings
 from app.services.embedding import embedding_service
 from app.services.qdrant_service import qdrant_service
 from app.services.llm_service import llm_service
+from app.services.reranker import reranker_service
 
+settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
@@ -146,7 +149,7 @@ RELEVANCE_THRESHOLD = 0.35
 # The principled fix is two-stage retrieval — vector search for recall, then a
 # cross-encoder rerank for precision. That's worth doing once there's an
 # evaluation set to prove it helps.
-DEFAULT_RETRIEVAL_LIMIT = 12
+DEFAULT_RETRIEVAL_LIMIT = settings.RETRIEVAL_LIMIT
 
 # ── Source diversity ─────────────────────────────────────────
 # ⚠️  THE ACTUAL FIX FOR THE PROBLEM ABOVE.
@@ -171,7 +174,7 @@ DEFAULT_RETRIEVAL_LIMIT = 12
 # excerpts from one.
 #
 # We over-fetch, cap, then trim back to `limit`.
-MAX_CHUNKS_PER_DOCUMENT = 3
+MAX_CHUNKS_PER_DOCUMENT = settings.MAX_CHUNKS_PER_DOCUMENT
 _OVERFETCH_FACTOR = 4
 
 
@@ -235,6 +238,9 @@ class RetrievedChunk:
     document_title: str | None = None
     source_type: str | None = None
     chunk_index: int | None = None
+    # Cross-encoder relevance (Phase 3.5). Unbounded logit, ordering only —
+    # never render this as a percentage. `score` stays the cosine value.
+    rerank_score: float | None = None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -501,15 +507,68 @@ class RAGService:
         happens on every single chat message rather than on occasional uploads,
         so under any concurrency it serialises the whole application.
         """
-        # Over-fetch, then enforce source diversity, then trim to `limit`.
-        # See MAX_CHUNKS_PER_DOCUMENT for why this is necessary.
-        raw = await run_in_threadpool(
-            self._retrieve_sync, query, limit * _OVERFETCH_FACTOR, source_type
+        # ── Stage 1: vector search for RECALL ──
+        # Deliberately over-fetch. Cheap, and the precision stage below is
+        # what decides what actually reaches the model.
+        n_candidates = max(
+            settings.RERANK_CANDIDATES if settings.RERANK_ENABLED else limit * _OVERFETCH_FACTOR,
+            limit,
         )
-        diverse = cap_per_document(raw, MAX_CHUNKS_PER_DOCUMENT)[:limit]
+        candidates = await run_in_threadpool(
+            self._retrieve_sync, query, n_candidates, source_type
+        )
+        if not candidates:
+            return []
+
+        # ── Stage 2: cross-encoder rerank for PRECISION ──
+        candidates = await self._rerank(query, candidates)
+
+        # ── Stage 3: diversity cap, THEN trim ──
+        # ⚠️  ORDER MATTERS, AND IT CHANGED IN PHASE 3.5.
+        # The cap used to run on the raw vector order. But the evaluation
+        # baseline showed the correct document ranking #1 while the passage
+        # answering the question went unretrieved — so capping before scoring
+        # could discard the very chunk we needed, purely because two weaker
+        # chunks from the same document happened to be embedded closer.
+        # Capping AFTER reranking means we keep each document's genuinely most
+        # relevant passages.
+        diverse = cap_per_document(candidates, MAX_CHUNKS_PER_DOCUMENT)[:limit]
 
         # Collapse overlapping neighbours before the LLM ever sees them.
         return merge_adjacent_chunks(diverse)
+
+    async def _rerank(
+        self,
+        query: str,
+        chunks: list[RetrievedChunk],
+    ) -> list[RetrievedChunk]:
+        """
+        Reorder chunks by cross-encoder relevance.
+
+        Returns the input unchanged when reranking is unavailable — that is a
+        supported state, not an error. See reranker.py.
+
+        NOTE: `chunk.score` keeps the ORIGINAL cosine similarity. Cross-encoder
+        outputs are unbounded logits (~-11..+11) and would be meaningless shown
+        as "74% match" in the evidence panel. The rerank score is recorded
+        separately for debugging; only the ordering changes.
+        """
+        scores = await run_in_threadpool(
+            reranker_service.score, query, [c.text for c in chunks]
+        )
+        if scores is None:
+            return chunks
+
+        for chunk, score in zip(chunks, scores):
+            chunk.rerank_score = score
+
+        ordered = sorted(chunks, key=lambda c: c.rerank_score or 0.0, reverse=True)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            moved = sum(1 for i, c in enumerate(ordered) if chunks[i] is not c)
+            logger.debug("Rerank reordered %d/%d chunks", moved, len(chunks))
+
+        return ordered
 
     # ── BUILD PROMPT ─────────────────────────────────────────
 

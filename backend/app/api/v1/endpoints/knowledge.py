@@ -68,6 +68,7 @@ from app.services.embedding import embedding_service
 from app.services.knowledge_seeder import seed_knowledge_base, ncbi_is_configured
 from app.services.pmc_fetcher import fetch_and_ingest_pmc, DEFAULT_TOPICS
 from app.services.qdrant_service import qdrant_service
+from app.services.rag_service import rag_service
 
 settings = get_settings()
 
@@ -503,42 +504,46 @@ async def get_document_chunks(
 )
 async def search_knowledge(request: SearchRequest):
     """
-    Semantic search — find relevant medical content by meaning.
-    
-    THIS IS THE PREVIEW OF PHASE 3's RAG RETRIEVAL.
-    
-    How it works:
-    1. Your query text is converted to a 384-dim vector
-    2. Qdrant finds the stored chunks with the most similar vectors
-    3. Results are returned with similarity scores and source info
-    
-    Example query: "What are the radiographic findings of pneumothorax?"
-    → Returns chunks about absent lung markings, visible pleural line, etc.
+    Semantic search — returns exactly what /chat would use as its context.
+
+    ⚠️  THIS ENDPOINT USED TO BYPASS THE RAG PIPELINE, AND IT COST US.
+    It called qdrant_service.search() directly: no cross-encoder reranking, no
+    per-document capping, no adjacent-chunk merging. /chat meanwhile went
+    through rag_service.retrieve_context(), which does all three.
+
+    Two divergent retrieval paths meant the evaluation harness — which measures
+    this endpoint — reported *byte-identical* results across three runs while
+    reranking was demonstrably working on /chat. Every conclusion drawn from
+    those numbers was about code no user ever hits.
+
+    Now there is ONE retrieval path. What you measure here is what the model
+    receives. An evaluation harness pointed at a different code path than
+    production is worse than no harness, because it produces confident numbers
+    about the wrong thing.
     """
-    # Embed the search query
-    query_vector = embedding_service.encode_single(request.query)
-    
-    # Search Qdrant
-    results = qdrant_service.search(
-        query_vector=query_vector,
+    chunks = await rag_service.retrieve_context(
+        query=request.query,
         limit=request.limit,
         source_type=request.source_type,
     )
-    
+
     return SearchResponse(
         query=request.query,
         results=[
             SearchResult(
-                text=r["text"],
-                score=r["score"],
-                document_id=r.get("document_id"),
-                filename=r.get("filename"),
-                source_type=r.get("source_type"),
-                chunk_index=r.get("chunk_index"),
+                text=c.text,
+                # Cosine similarity, NOT the rerank score. Cross-encoder
+                # outputs are unbounded logits and would be meaningless as a
+                # "% match". Reranking changes the order, not this number.
+                score=c.score,
+                document_id=c.document_id,
+                filename=c.document_title,
+                source_type=c.source_type,
+                chunk_index=c.chunk_index,
             )
-            for r in results
+            for c in chunks
         ],
-        total_results=len(results),
+        total_results=len(chunks),
     )
 
 

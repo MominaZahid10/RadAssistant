@@ -119,6 +119,15 @@ services:
       # HF_HUB_OFFLINE=0, i.e. the one time you populate the cache.
       - HF_HUB_DOWNLOAD_TIMEOUT=60
       - HF_HUB_ETAG_TIMEOUT=30
+      # Toggleable so the reranker can be A/B tested against vector-only
+      # retrieval on the SAME code path:
+      #   RERANK_ENABLED=false docker-compose up -d backend   → baseline
+      #   RERANK_ENABLED=true  docker-compose up -d backend   → reranked
+      - RERANK_ENABLED=${RERANK_ENABLED:-true}
+      # Retrieval tuning knobs — sweep these against eval/run_eval.py
+      - RERANK_CANDIDATES=${RERANK_CANDIDATES:-48}
+      - RETRIEVAL_LIMIT=${RETRIEVAL_LIMIT:-12}
+      - MAX_CHUNKS_PER_DOCUMENT=${MAX_CHUNKS_PER_DOCUMENT:-3}
     volumes:
       - ./backend:/app             # Mount code for hot reload
       - uploads_data:/app/uploads  # Named volume so uploads don't land in your source tree

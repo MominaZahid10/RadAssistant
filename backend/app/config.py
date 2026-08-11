@@ -105,6 +105,39 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSION: int = 384
     EMBEDDING_BATCH_SIZE: int = 32  # How many chunks to embed at once
 
+    # ── Reranking (Phase 3.5) ────────────────────────────────
+    # Two-stage retrieval: vector search finds candidates (recall), then a
+    # cross-encoder rescores them by actual query-passage relevance
+    # (precision). Measured need: source recall@12 was 88.9% but keyword
+    # recall@12 only 72.2% — we were finding the right documents and
+    # retrieving the wrong passages from them.
+    #
+    # Set RERANK_ENABLED=false to fall back to pure vector ordering. The
+    # service also degrades to that automatically if the model can't load,
+    # so a failed download never breaks chat.
+    RERANK_ENABLED: bool = True
+    RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    # How many vector hits to rescore. Bigger = better recall before the
+    # precision stage, at ~1ms per candidate on CPU. 48 ≈ 50ms, which is
+    # comparable to the vector search itself.
+    RERANK_CANDIDATES: int = 48
+
+    # Chunks retrieved per question, and the most any single document may
+    # contribute. Both are tuning knobs — exposed as env vars so they can be
+    # swept against the evaluation harness without editing code:
+    #
+    #   RETRIEVAL_LIMIT=12 MAX_CHUNKS_PER_DOCUMENT=5 docker-compose up -d backend
+    #   cd backend && python eval/run_eval.py --vs vector_only
+    #
+    # MEASURED TENSION: capping at 3 forces source diversity (good for an
+    # evidence panel — corroboration beats four excerpts from one paper), but
+    # three evaluation questions retrieve the correct document at rank 1 and
+    # STILL miss the answering passage, because it's that document's 4th-best
+    # chunk. Diversity and depth trade directly against each other here.
+    RETRIEVAL_LIMIT: int = 12
+    MAX_CHUNKS_PER_DOCUMENT: int = 3
+
     # ── Text Chunking (Phase 2) ──────────────────────────────
     # Documents are split into small "chunks" before embedding.
     # WHY? Embedding models have a token limit (~256 tokens for MiniLM).

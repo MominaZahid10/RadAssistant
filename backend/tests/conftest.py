@@ -37,6 +37,7 @@ def _stub_heavy_dependencies() -> None:
     # ── Embeddings (would download ~80MB and load PyTorch) ──
     st = _install_stub("sentence_transformers")
     st.SentenceTransformer = _AnyCallable
+    st.CrossEncoder = _AnyCallable          # Phase 3.5 reranker
 
     # ── Document parsing ────────────────────────────────────
     _install_stub("fitz")

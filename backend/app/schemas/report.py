@@ -1,140 +1,137 @@
 """
-RadAssist AI — Report Schemas (Phase 3)
+RadAssist AI — Report Schemas (Phase 5, Step 0.5)
 
-Request/response shapes for the report generation endpoint.
-
-REPORT MODE IS DIFFERENT FROM CHAT:
-- Chat (Q&A): Explains reasoning, defines terms, conversational
-- Report:     Terse clinical register, structured Findings/Impression,
-              no explanatory prose — output goes into a medical record
-
-These schemas enforce that distinction at the API boundary.
+Request and response shapes for the report sign-off loop.
 """
 
-from pydantic import BaseModel, Field
+from datetime import datetime
 from enum import Enum
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-# ══════════════════════════════════════════════════════════════
-# ENUMS
-# ══════════════════════════════════════════════════════════════
+class ReportStatusEnum(str, Enum):
+    DRAFT = "draft"
+    APPROVED = "approved"
+    REJECTED = "rejected"
 
 
-class Modality(str, Enum):
-    """
-    Imaging modality — used to give the LLM context about what kind
-    of study produced these findings. Affects terminology and structure.
-    """
-    XRAY = "x-ray"
-    CT = "ct"
-    MRI = "mri"
-    ULTRASOUND = "ultrasound"
-    MAMMOGRAPHY = "mammography"
-    FLUOROSCOPY = "fluoroscopy"
-    PET_CT = "pet-ct"
-    OTHER = "other"
+class ReportCreate(BaseModel):
+    """Persist a draft the model just produced."""
 
-
-class BodyRegion(str, Enum):
-    """Body region being imaged — helps the LLM scope its knowledge retrieval."""
-    CHEST = "chest"
-    ABDOMEN = "abdomen"
-    HEAD = "head"
-    SPINE = "spine"
-    MSK = "musculoskeletal"
-    BREAST = "breast"
-    CARDIAC = "cardiac"
-    VASCULAR = "vascular"
-    PELVIS = "pelvis"
-    NECK = "neck"
-    OTHER = "other"
-
-
-# ══════════════════════════════════════════════════════════════
-# REQUEST
-# ══════════════════════════════════════════════════════════════
-
-
-class ReportRequest(BaseModel):
-    """
-    Request to generate a structured radiology report section.
-
-    Example:
-    {
-        "findings": "PA and lateral chest radiograph. Heart size normal.
-                     Lungs are clear. No pleural effusion or pneumothorax.
-                     No acute osseous abnormality.",
-        "modality": "x-ray",
-        "body_region": "chest",
-        "include_sources": true
-    }
-    """
-    findings: str = Field(
-        ...,
-        min_length=10,
-        max_length=5000,
+    findings_input: str = Field(
+        min_length=1, max_length=20_000,
+        description="The findings the clinician dictated, verbatim.",
+    )
+    ai_draft: str = Field(
+        min_length=1, max_length=50_000,
         description=(
-            "The clinical findings to generate a report from. "
-            "Can be free-text observations, key findings, or "
-            "a draft that needs structuring."
+            "The generated draft, exactly as produced. Stored immutably — "
+            "edits go to edited_text so the model's output and the human's "
+            "corrections stay distinguishable."
         ),
     )
-    modality: Modality = Field(
-        default=Modality.OTHER,
-        description="Imaging modality (x-ray, ct, mri, etc.)",
+    model: str | None = Field(
+        default=None,
+        description="Which model produced the draft, for later explanation.",
     )
-    body_region: BodyRegion = Field(
-        default=BodyRegion.OTHER,
-        description="Body region being imaged.",
-    )
-    include_sources: bool = Field(
-        default=True,
+    sources: list[dict] | None = Field(
+        default=None,
         description=(
-            "If true, the response includes the source chunks "
-            "used to ground the generated report."
+            "The retrieved chunks the draft was generated against. Kept "
+            "because the corpus gets re-indexed and the model gets swapped; "
+            "without a snapshot, 'what informed this report' is unanswerable."
         ),
     )
+    image_id: UUID | None = None
 
 
-# ══════════════════════════════════════════════════════════════
-# SOURCE (reuse from rag schemas)
-# ══════════════════════════════════════════════════════════════
+class ReportUpdate(BaseModel):
+    """
+    Edit the text, or sign the report off.
 
-# We import SourceReference from rag.py — no duplication.
-from app.schemas.rag import SourceReference  # noqa: E402
+    ⚠️  STATUS AND TEXT MOVE TOGETHER ON PURPOSE.
+    Approving is a claim about a specific wording. If the editor sent the text
+    in one request and the approval in another, a slow network could record an
+    approval against text the reviewer never saw. One request, one decision.
+    """
 
-
-# ══════════════════════════════════════════════════════════════
-# RESPONSE
-# ══════════════════════════════════════════════════════════════
+    edited_text: str | None = Field(
+        default=None, max_length=50_000,
+        description=(
+            "The reviewer's wording. Omit to accept the draft unchanged — "
+            "that is a distinct, meaningful state, not the same as sending "
+            "back an identical string."
+        ),
+    )
+    status: ReportStatusEnum | None = None
+    reviewed_by: str | None = Field(
+        default=None, max_length=200,
+        description="Who signed it. Free text until Phase 6 adds auth.",
+    )
+    review_note: str | None = Field(
+        default=None, max_length=5_000,
+        description="Why it was rejected, or a note attached at sign-off.",
+    )
 
 
 class ReportResponse(BaseModel):
-    """
-    Generated radiology report section.
+    id: UUID
 
-    Example:
-    {
-        "report": "FINDINGS:\\nHeart size is normal...\\n\\nIMPRESSION:\\n1. No acute...",
-        "sources": [...],
-        "modality": "x-ray",
-        "body_region": "chest",
-        "model": "llama-3.3-70b-versatile"
-    }
+    findings_input: str
+    ai_draft: str = Field(description="The model's original output. Never modified.")
+    edited_text: str | None = None
+    final_text: str = Field(
+        description="What the report says: edits if present, otherwise the draft."
+    )
+    was_edited: bool = Field(
+        description=(
+            "Whether a human changed the wording. Compared on content, so "
+            "opening a draft and approving it unchanged does not count as an "
+            "edit."
+        )
+    )
+
+    status: str
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    review_note: str | None = None
+
+    model: str | None = None
+    sources: list[dict] | None = None
+    image_id: UUID | None = None
+
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
+
+class ReportListResponse(BaseModel):
+    reports: list[ReportResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class ReportStats(BaseModel):
     """
-    report: str = Field(
-        description="The generated report text (Findings/Impression format).",
+    Sign-off statistics.
+
+    `edit_rate` is the number that matters. It is how often the model's draft
+    needed changing before a clinician would sign it — the closest thing this
+    project has to a measured safety signal, and it only exists because
+    ai_draft and edited_text are stored separately.
+    """
+    total: int
+    draft: int
+    approved: int
+    rejected: int
+    edited: int
+    edit_rate: float = Field(
+        description="Fraction of reviewed reports a human had to reword."
     )
-    sources: list[SourceReference] | None = Field(
-        default=None,
-        description="Source chunks used to ground the report.",
-    )
-    modality: str = Field(
-        description="The modality of the study.",
-    )
-    body_region: str = Field(
-        description="The body region imaged.",
-    )
-    model: str = Field(
-        description="The LLM model that generated the report.",
+    approval_rate: float = Field(
+        description="Fraction of reviewed reports that were approved."
     )

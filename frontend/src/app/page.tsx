@@ -21,6 +21,7 @@ import {
   type MedicalImage,
 } from "@/lib/api";
 import ImageViewer from "@/components/ImageViewer";
+import ReportEditor from "@/components/ReportEditor";
 
 interface Message {
   id: string;
@@ -32,6 +33,15 @@ interface Message {
   model?: string;
   isStreaming?: boolean;
   isError?: boolean;
+  /** Which mode produced this. "report" renders as an editable document. */
+  mode?: ChatMode;
+  /**
+   * The findings this draft was generated from. Kept on the message so
+   * Regenerate does not have to guess at the input — reading it back out of
+   * the preceding user bubble would break the moment anything else is
+   * inserted between them.
+   */
+  findingsInput?: string;
 }
 
 /**
@@ -415,6 +425,8 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Lets regenerateReport call handleSend, which is defined further down.
+  const sendRef = useRef<(() => void) | null>(null);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -429,6 +441,21 @@ export default function ChatPage() {
         Math.min(textareaRef.current.scrollHeight, 200) + "px";
     }
   }, [input]);
+
+  /**
+   * Re-run generation from the same dictated findings.
+   *
+   * Sets the composer and defers the send by a tick so `input` and `mode` are
+   * committed before handleSend reads them — calling it synchronously would
+   * send the previous input, which is the kind of bug that only shows up when
+   * someone regenerates twice.
+   */
+  const regenerateReport = useCallback((findings: string) => {
+    if (!findings.trim()) return;
+    setMode("report");
+    setInput(findings);
+    setTimeout(() => sendRef.current?.(), 0);
+  }, []);
 
   const toggleSources = useCallback((messageId: string) => {
     setExpandedSources((prev) => {
@@ -475,7 +502,7 @@ export default function ChatPage() {
     }
   };
 
-  const handleSend = async () => {
+  const handleSend = async (): Promise<void> => {
     const trimmed = input.trim();
     const attachments = pending;
 
@@ -495,6 +522,10 @@ export default function ChatPage() {
       role: "assistant",
       content: "",
       isStreaming: true,
+      // Captured now, not read back from the preceding bubble later — the
+      // editor needs the exact input to regenerate from.
+      mode,
+      findingsInput: trimmed,
     };
 
     setMessages((prev) => [...prev, userMsg, aiMsg]);
@@ -651,6 +682,10 @@ export default function ChatPage() {
     }
   };
 
+  // Kept current so Regenerate calls the latest closure rather than the one
+  // captured when the component first mounted.
+  sendRef.current = handleSend;
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -729,6 +764,26 @@ export default function ChatPage() {
                       msg.role === "user" ? "whitespace-pre-wrap" : ""
                     } ${msg.isError ? "text-error" : "text-foreground"}`}
                   >
+                    {/* A finished report draft becomes an editable, signable
+                        document rather than a chat bubble. Still streaming, it
+                        renders as text — an editor whose contents rewrite
+                        themselves mid-keystroke is not usable. */}
+                    {msg.mode === "report" &&
+                    !msg.isStreaming &&
+                    !msg.isError &&
+                    msg.content.trim() ? (
+                      <ReportEditor
+                        draft={msg.content}
+                        findingsInput={msg.findingsInput ?? ""}
+                        model={msg.model}
+                        sources={
+                          msg.sources as unknown as Record<string, unknown>[]
+                        }
+                        onRegenerate={() =>
+                          regenerateReport(msg.findingsInput ?? "")
+                        }
+                      />
+                    ) : (
                     <MarkdownAnswer
                       text={msg.content}
                       sourceCount={msg.sources?.length ?? 0}
@@ -753,6 +808,7 @@ export default function ChatPage() {
                         });
                       }}
                     />
+                    )}
                     {msg.isStreaming && (
                       <span className="inline-block w-2 h-4 bg-accent/70 ml-0.5 animate-pulse rounded-sm" />
                     )}

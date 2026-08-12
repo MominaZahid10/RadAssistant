@@ -644,3 +644,80 @@ body {
   .source-figure { transition: none; }
   .source-figure:hover { transform: none; }
 }
+
+/* ── Report editor: the Review & Sign-off Layer (Phase 5) ────────
+   A draft going into a patient record should not look like a chat
+   bubble. Monospace, generous line height, and a visible status —
+   the human-in-the-loop has to be apparent, not implied. */
+.report-editor {
+  margin-top: 0.5rem;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 0.6rem;
+  overflow: hidden;
+  background: var(--background-secondary, #111);
+}
+.report-editor-bar {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+  font-size: 0.68rem;
+}
+.report-status {
+  font-weight: 600; letter-spacing: 0.02em;
+  padding: 0.12rem 0.45rem; border-radius: 0.3rem;
+}
+.report-status--draft    { background: #3a3000; color: #f0c000; }
+.report-status--approved { background: #06331c; color: #34d399; }
+.report-status--rejected { background: #3a0f0f; color: #f87171; }
+.report-edited-flag {
+  color: var(--foreground-muted, #8b8b8b); font-style: italic;
+}
+.report-meta {
+  margin-left: auto; color: var(--foreground-muted, #8b8b8b);
+}
+
+.report-editor-text {
+  display: block; width: 100%;
+  padding: 0.8rem 0.9rem;
+  background: transparent; border: 0; outline: none; resize: none;
+  color: var(--foreground, #ededed);
+  /* Monospace so column alignment and stray characters are visible —
+     a wrong digit should be conspicuous, not blend into prose. */
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem; line-height: 1.65;
+  overflow: hidden;   /* height is set from scrollHeight */
+}
+.report-editor-text[readonly] { opacity: 0.75; cursor: default; }
+
+.report-error {
+  padding: 0 0.9rem 0.5rem; font-size: 0.7rem;
+  color: var(--error, #f87171);
+}
+
+.report-actions {
+  display: flex; flex-wrap: wrap; gap: 0.4rem;
+  padding: 0.55rem 0.7rem;
+  border-top: 1px solid var(--border, #2a2a2a);
+}
+.report-btn {
+  padding: 0.3rem 0.7rem; border-radius: 0.35rem;
+  border: 1px solid var(--border, #2a2a2a);
+  background: transparent; color: var(--foreground, #ededed);
+  font-size: 0.7rem; cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.report-btn:hover:not(:disabled) { border-color: var(--accent, #3b82f6); }
+.report-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.report-btn--approve { border-color: #34d399; color: #34d399; }
+.report-btn--approve:hover:not(:disabled) { background: #06331c; }
+.report-btn--reject  { border-color: #f87171; color: #f87171; }
+.report-btn--reject:hover:not(:disabled)  { background: #3a0f0f; }
+
+/* Rendered by the UI, not by the model. The project document requires the
+   human-in-the-loop to be explicit, and a model told to print a disclaimer
+   can be prompted out of it — or simply forget. */
+.report-disclaimer {
+  padding: 0 0.9rem 0.7rem;
+  font-size: 0.65rem; font-style: italic;
+  color: var(--foreground-muted, #8b8b8b);
+}

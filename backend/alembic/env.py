@@ -31,7 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import get_settings          # noqa: E402
 from app.core.database import Base           # noqa: E402
-from app.models import document               # noqa: E402,F401 — registers the model
+# ⚠️  EVERY model must be imported, or autogenerate proposes DROPPING its
+# table. Importing the package pulls in all of them at once, so adding a model
+# in a later phase cannot be forgotten here.
+from app import models                        # noqa: E402,F401 — registers every model
 
 config = context.config
 

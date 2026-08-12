@@ -461,3 +461,117 @@ export const imageApi = {
     }
   },
 };
+
+// ══════════════════════════════════════════════════════════════
+// REPORTS — draft, edit, sign off (Phase 5)
+// ══════════════════════════════════════════════════════════════
+
+export type ReportStatus = "draft" | "approved" | "rejected";
+
+export interface Report {
+  id: string;
+
+  /** The findings the clinician dictated, verbatim. */
+  findings_input: string;
+  /** The model's original output. Never modified. */
+  ai_draft: string;
+  /** The reviewer's wording. Null means the draft was accepted as written. */
+  edited_text: string | null;
+  /** What the report says: edits if present, otherwise the draft. */
+  final_text: string;
+  /**
+   * Whether a human changed the wording. Compared on content, so opening a
+   * draft and approving it unchanged does not count as an edit.
+   */
+  was_edited: boolean;
+
+  status: ReportStatus;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+
+  model: string | null;
+  sources: Record<string, unknown>[] | null;
+  image_id: string | null;
+
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReportStats {
+  total: number;
+  draft: number;
+  approved: number;
+  rejected: number;
+  edited: number;
+  /** How often a human had to reword the draft before signing it. */
+  edit_rate: number;
+  approval_rate: number;
+}
+
+export const reportApi = {
+  /**
+   * Persist a draft the model just produced.
+   *
+   * `ai_draft` is stored immutably; edits go to `edited_text`. Keeping them
+   * apart is what makes it possible to measure how often the model's output
+   * needed correcting — collapsing them would destroy that permanently.
+   */
+  create: (payload: {
+    findings_input: string;
+    ai_draft: string;
+    model?: string | null;
+    sources?: Record<string, unknown>[] | null;
+    image_id?: string | null;
+  }) =>
+    fetchAPI<Report>("/api/v1/reports", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+
+  get: (id: string) => fetchAPI<Report>(`/api/v1/reports/${id}`),
+
+  list: (params?: { page?: number; pageSize?: number; status?: ReportStatus }) => {
+    const q = new URLSearchParams();
+    if (params?.page) q.set("page", String(params.page));
+    if (params?.pageSize) q.set("page_size", String(params.pageSize));
+    if (params?.status) q.set("status", params.status);
+    const qs = q.toString();
+    return fetchAPI<{
+      reports: Report[];
+      total: number;
+      page: number;
+      page_size: number;
+    }>(`/api/v1/reports${qs ? `?${qs}` : ""}`);
+  },
+
+  /**
+   * Save wording, sign off, or both.
+   *
+   * Text and status travel together on purpose: approving is a claim about a
+   * specific wording, and sending them separately would let a slow network
+   * record an approval against text the reviewer never saw.
+   *
+   * Editing an approved report returns 409 — reopen it to "draft" first.
+   */
+  update: (
+    id: string,
+    payload: {
+      edited_text?: string;
+      status?: ReportStatus;
+      reviewed_by?: string;
+      review_note?: string;
+    }
+  ) =>
+    fetchAPI<Report>(`/api/v1/reports/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+
+  remove: (id: string) =>
+    fetchAPI<{ message: string }>(`/api/v1/reports/${id}`, { method: "DELETE" }),
+
+  stats: () => fetchAPI<ReportStats>("/api/v1/reports/stats"),
+};

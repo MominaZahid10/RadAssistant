@@ -26,6 +26,7 @@ from app.api.v1.endpoints import health
 from app.api.v1.endpoints import knowledge  # Phase 2: Knowledge base endpoints
 from app.api.v1.endpoints import chat       # Phase 3: AI chat with RAG
 from app.api.v1.endpoints import images     # Phase 4: DICOM & image storage
+from app.api.v1.endpoints import reports    # Phase 5: report drafts & sign-off
 
 # Create the v1 router — all v1 endpoints are collected here
 api_v1_router = APIRouter(prefix="/api/v1")
@@ -37,8 +38,9 @@ api_v1_router.include_router(health.router)
 api_v1_router.include_router(knowledge.router)  # Phase 2: /api/v1/knowledge/*
 api_v1_router.include_router(chat.router)        # Phase 3: /api/v1/chat/*
 api_v1_router.include_router(images.router)      # Phase 4: /api/v1/images/*
+api_v1_router.include_router(reports.router)     # Phase 5: /api/v1/reports/*
 
 # Future phases will add:
-# api_v1_router.include_router(reports.router)   # Phase 3 (report generation)
-# api_v1_router.include_router(cases.router)     # Phase 3 (case management)
+# api_v1_router.include_router(cases.router)     # Phase 5+ (case management)
+# api_v1_router.include_router(auth.router)      # Phase 6 (authentication)
 

@@ -30,6 +30,17 @@ python-docx==1.1.0        # DOCX (Word) text extraction
 Pillow==10.4.0            # Image handling — open, resize, convert image formats
 pytesseract==0.3.13       # OCR — extract text from images (uses Tesseract engine)
 
+# ── Medical Imaging (Phase 4) ────────────────────────────────
+# DICOM parsing. Imported lazily by dicom_service — if it's absent the
+# app still runs and DICOM uploads are rejected with a clear message,
+# so a failed install never takes the service down.
+pydicom==2.4.4
+# Decoders for compressed transfer syntaxes (JPEG-LS, JPEG2000), which
+# most real CT/MR exports use. Without these, pixel_array raises.
+pylibjpeg==2.0.0
+pylibjpeg-libjpeg==2.1.0
+pylibjpeg-openjpeg==2.1.1
+
 # ── Embeddings (Phase 2) ─────────────────────────────────────
 sentence-transformers==3.0.1  # Load & run embedding models (all-MiniLM-L6-v2)
 

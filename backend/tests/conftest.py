@@ -53,6 +53,12 @@ def _stub_heavy_dependencies() -> None:
     # ── NCBI client ─────────────────────────────────────────
     _install_stub("Bio")
 
+    # ── DICOM (Phase 4) ─────────────────────────────────────
+    # Deliberately NOT stubbed. dicom_service imports it lazily and
+    # degrades when absent, and the tests exercise that path directly
+    # with a FakeDataset — which is closer to the real deployment,
+    # where pydicom may genuinely not be installed.
+
     # ── Qdrant (would try to open a TCP connection at import) ──
     qc = _install_stub("qdrant_client")
     qc.QdrantClient = _AnyCallable

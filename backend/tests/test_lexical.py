@@ -194,3 +194,109 @@ def test_info_reports_state(index):
     assert info["built"] is True
     assert info["stale"] is False
     assert info["chunks"] == len(CORPUS)
+
+
+# ══════════════════════════════════════════════════════════════
+# SALIENT TERMS — building a query from an uploaded document
+# ══════════════════════════════════════════════════════════════
+#
+# THE OBSERVED FAILURE, reproduced below:
+# A clinician uploaded a lumbar spine report and typed a generic instruction.
+# All twelve retrieved sources were papers about the PRACTICE of radiology
+# reporting — reporting errors, structured-reporting templates, NLP reporting
+# quality — because the instruction, not the report, was what got embedded.
+
+
+# A corpus deliberately containing both traps: meta-papers about reporting
+# (which the instruction pulls) and the clinical content actually wanted.
+MIXED_CORPUS = [
+    {"point_id": "r1", "document_id": "m1",
+     "title": "Revealing the most common reporting errors",
+     "text": "Radiology report proofreading. Residents write a preliminary report and "
+             "the attending edits the report. Report findings and report impression "
+             "sections were compared across reports."},
+    {"point_id": "r2", "document_id": "m2",
+     "title": "Structured reporting for fibrosing lung disease",
+     "text": "A structured report template was developed by consensus. The report "
+             "format and reporting standards were agreed among radiologists writing "
+             "the findings section of each report."},
+    {"point_id": "c1", "document_id": "m3",
+     "title": "Vertebral compression fracture imaging",
+     "text": "Anterior wedge deformity of the vertebral body indicates a compression "
+             "fracture. Loss of anterior vertebral body height is graded by severity. "
+             "Retropulsion into the spinal canal must be excluded."},
+    {"point_id": "c2", "document_id": "m4",
+     "title": "Osteopenia and postmenopausal osteoporosis",
+     "text": "Osteopenia describes reduced bone mineral density. Severe postmenopausal "
+             "osteoporosis of the lumbar spine and pelvis predisposes to vertebral "
+             "fracture. Bone density is assessed by DXA."},
+    {"point_id": "c3", "document_id": "m5",
+     "title": "Lumbar lordosis and sagittal alignment",
+     "text": "Lumbar lordosis is the normal curvature of the lumbar spine. Increased "
+             "lordosis alters sagittal alignment and loading of the facet joints."},
+]
+
+# The OCR output from the report that motivated this, garbled words intact.
+OCR_REPORT = """
+    The lumbar spine ts hyperiordotic.
+    Marked osteopenia is noted throughout the lumbar spine and peivis.
+    An anterior wedge deformity of Tz with a 50% loss of anterior vertebral
+    body height is noted. There is no evidence of posterior vertebral body
+    collapse or bony projection into the neutral canal.
+    All joint spaces appear well maintained. The solt tissues are unremarkable.
+    IMPRESSION: Tracompression tracture. Severe post-menopausal osteoporosis.
+"""
+
+
+@pytest.fixture
+def mixed_index():
+    idx = LexicalIndex()
+    idx.build(MIXED_CORPUS)
+    return idx
+
+
+def test_salient_terms_surface_the_clinical_subject(mixed_index):
+    """The terms that describe what the report is ABOUT must be selected."""
+    terms = set(mixed_index.salient_terms(OCR_REPORT, top_k=24))
+    for expected in ("osteopenia", "vertebral", "wedge", "lumbar", "osteoporosis"):
+        assert expected in terms, f"{expected!r} missing from {sorted(terms)}"
+
+
+def test_salient_terms_drop_ocr_garbage(mixed_index):
+    """
+    Misread words are the HIGHEST-IDF tokens in the document — nothing is
+    rarer than a word that doesn't exist. Requiring corpus membership is what
+    keeps them out of the query.
+    """
+    terms = set(mixed_index.salient_terms(OCR_REPORT, top_k=50))
+    for garbage in ("hyperiordotic", "peivis", "solt", "tracompression", "tracture"):
+        assert garbage not in terms, f"OCR misread {garbage!r} leaked into the query"
+
+
+def test_salient_terms_deprioritise_report_boilerplate(mixed_index):
+    """
+    'report'/'findings' appear across the corpus, so their IDF is low and they
+    sink beneath the clinical terms. This is what stopped retrieval returning
+    papers about the practice of writing reports.
+    """
+    ranked = mixed_index.salient_terms(
+        "Please review the attached report findings.\n" + OCR_REPORT, top_k=8
+    )
+    assert "report" not in ranked
+    assert "findings" not in ranked
+    assert any(t in ranked for t in ("osteopenia", "vertebral", "osteoporosis"))
+
+
+def test_salient_terms_respect_top_k(mixed_index):
+    assert len(mixed_index.salient_terms(OCR_REPORT, top_k=5)) == 5
+
+
+def test_salient_terms_on_unbuilt_index_returns_empty():
+    """Never raises — the caller falls back to the raw query."""
+    assert LexicalIndex().salient_terms(OCR_REPORT) == []
+
+
+def test_salient_terms_on_unrelated_document_returns_nothing_invented(mixed_index):
+    """A document sharing no vocabulary with the corpus yields no terms,
+    rather than terms the corpus cannot support."""
+    assert mixed_index.salient_terms("qwerty zxcvbn plugh xyzzy") == []

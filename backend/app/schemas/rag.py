@@ -14,6 +14,31 @@ from enum import Enum
 # ══════════════════════════════════════════════════════════════
 
 
+class ChatMode(str, Enum):
+    """
+    What the model is being asked to DO, as opposed to who for (Audience).
+
+    qa     — answer a question from the knowledge base, conversational register
+    report — draft a structured radiology report from findings the user typed
+
+    ⚠️  WHY THIS IS AN ENUM AND NOT A FREE STRING.
+    An unrecognised mode must fail at validation with a 422. The alternative —
+    falling back to "qa" — means a clinician who asked for a report gets a
+    chat answer and no error anywhere. That is the same class of silent
+    substitution that inverted a clinical finding in Phase 4: the system did
+    something reasonable-looking instead of the thing that was asked for, and
+    said nothing.
+
+    ⚠️  AND WHY THIS FIELD HAD TO EXIST AT ALL.
+    REPORT_SYSTEM_PROMPT and `mode="report"` were written in Phase 3 and
+    supported by rag_service throughout — but chat.py hardcoded mode="qa" at
+    both call sites, so no request could ever reach it. Report generation,
+    the headline deliverable, was unreachable code for two phases.
+    """
+    QA = "qa"
+    REPORT = "report"
+
+
 class Audience(str, Enum):
     """
     Who the Q&A response is written for.  Controls the register
@@ -49,6 +74,17 @@ class ChatRequest(BaseModel):
         max_length=2000,
         description="The user's question or instruction.",
     )
+    mode: ChatMode = Field(
+        default=ChatMode.QA,
+        description=(
+            "What to produce.\n\n"
+            "`qa` (default) — answer the question from the knowledge base.\n\n"
+            "`report` — treat the input as radiology FINDINGS and draft a "
+            "structured report (Findings / Impression) in clinical register, "
+            "with inline citations. Output goes into a medical record, so it "
+            "carries no conversational preamble or hedging prose."
+        ),
+    )
     stream: bool = Field(
         default=True,
         description="If true, response streams token-by-token via SSE.",
@@ -59,6 +95,27 @@ class ChatRequest(BaseModel):
             "Who the response is written for. "
             "'radiologist' = concise, standard terminology. "
             "'resident' = explains reasoning, defines terms."
+        ),
+    )
+    attached_text: str | None = Field(
+        default=None,
+        max_length=50_000,
+        description=(
+            "Text of a document the user uploaded (e.g. OCR of a report "
+            "photo). Sent SEPARATELY from the question, not concatenated "
+            "into it: appending it to the query made the model treat the "
+            "retrieved literature as authoritative and the patient's own "
+            "report as loose material — which inverted a clinical finding. "
+            "Supplied here, it is placed above the literature and named as "
+            "the primary source."
+        ),
+    )
+    attached_warnings: list[str] | None = Field(
+        default=None,
+        description=(
+            "Quality caveats about attached_text, e.g. low OCR confidence. "
+            "Passed to the model so it can flag unreliable passages rather "
+            "than stating misread text as fact."
         ),
     )
     include_sources: bool = Field(
@@ -165,6 +222,33 @@ class PMCFetchRequest(BaseModel):
     max_per_topic: int = Field(
         default=10, ge=1, le=50,
         description="Articles to retrieve per topic (1-50).",
+    )
+
+
+class FigureFetchRequest(BaseModel):
+    """
+    Options for PMC figure extraction.
+
+    A JSON body rather than query parameters, for the same reason
+    PMCFetchRequest is: an earlier endpoint declared its options as query
+    params while the client sent them in the body, so they were silently
+    ignored and the 202 looked successful.
+    """
+    limit_documents: int | None = Field(
+        default=None, ge=1,
+        description=(
+            "Process only the N most recently ingested PMC articles. Useful "
+            "for a quick trial run before committing to the whole corpus. "
+            "Omit to process everything."
+        ),
+        examples=[10],
+    )
+    max_figures_per_document: int = Field(
+        default=8, ge=1, le=30,
+        description=(
+            "Cap per article. Review papers can carry 40+ figures, most of "
+            "them multi-panel plates that add little beyond the first few."
+        ),
     )
 
 

@@ -148,6 +148,31 @@ class Settings(BaseSettings):
     RETRIEVAL_LIMIT: int = 12
     MAX_CHUNKS_PER_DOCUMENT: int = 3
 
+    # ── Image Storage (Phase 4) ──────────────────────────────
+    # Files live on disk, metadata in Postgres. A CT series is
+    # 100-500 MB; storing that in the database bloats backups and
+    # breaks replication.
+    IMAGE_DIR: str = "/app/images"
+    MAX_IMAGE_SIZE_MB: int = 200      # a DICOM series is far larger than a PDF
+    THUMBNAIL_MAX_PX: int = 256
+
+    # ── Vision reading of report photos (Phase 4.5) ──────────
+    # Tesseract classifies glyphs with no idea what a radiology report is. On
+    # a 424×471 photo it read "hyperlordotic" as "hypoiordotic" — inverting
+    # the finding — and "T12 ... 50%" as "Ts wh 250%". A vision-language
+    # model reads pixels and language together and resolves both from context.
+    #
+    # ⚠️  VISION_MODEL IS THE ONLY ONE GROQ STILL SERVES.
+    # Llama 4 Scout (07/17/26), Llama 4 Maverick (03/09/26) and the Llama 3.2
+    # vision previews (04/14/25) have all shut down. Check
+    # https://console.groq.com/docs/deprecations before changing this.
+    #
+    # Set VISION_ENABLED=false to fall back to Tesseract. The service also
+    # degrades automatically when GROQ_API_KEY is absent or the call fails,
+    # so a vision outage never fails an upload.
+    VISION_ENABLED: bool = True
+    VISION_MODEL: str = "qwen/qwen3.6-27b"
+
     # ── Text Chunking (Phase 2) ──────────────────────────────
     # Documents are split into small "chunks" before embedding.
     # WHY? Embedding models have a token limit (~256 tokens for MiniLM).

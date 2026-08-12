@@ -29,3 +29,11 @@ from app.schemas.rag import (  # noqa: F401  — Phase 3
     ProviderInfo,
     ModelInfoResponse,
 )
+
+from app.schemas.image import (  # noqa: F401  — Phase 4
+    ImageSourceType,
+    ImageResponse,
+    ImageListResponse,
+    ImageUploadResponse,
+    ImageStats,
+)

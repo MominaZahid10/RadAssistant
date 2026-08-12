@@ -97,6 +97,45 @@ FORMATTING:
 """.strip()
 
 
+# ── Grounding scaffold for REPORT mode ──
+#
+# ⚠️  THE GENERAL SCAFFOLD IS ACTIVELY WRONG HERE, AND IT WON.
+# GROUNDING_SCAFFOLD is appended to every mode. In report mode that produced
+# a direct contradiction the model resolved against us:
+#
+#   REPORT_SYSTEM_PROMPT:  "NO INLINE CITATIONS ANYWHERE IN THE REPORT BODY"
+#   GROUNDING_SCAFFOLD:    "Every factual claim MUST have at least one
+#                           citation" + a detailed CITATION FORMAT block
+#
+# Drafts came back as "Mild cardiomegaly. 1" — a bare number after a finding,
+# which in a medical record reads as a severity grade. The rule was right; it
+# was simply outnumbered by a longer, more specific instruction sitting two
+# lines below it.
+#
+# Two of the scaffold's other rules are also wrong for a report:
+#   "Answer ONLY from the CONTEXT"        — content comes from the dictation
+#   "NEVER assert a diagnosis. Frame       — a report states findings; it is
+#    findings as differential                not a differential discussion
+#    considerations"
+#
+# So report mode gets its own scaffold. Contradictory instructions do not
+# average out — one of them wins, and you do not get to choose which.
+REPORT_GROUNDING_SCAFFOLD = """
+GROUNDING RULES — these are non-negotiable:
+1. The dictated findings are the ONLY source of clinical content. The CONTEXT
+   below supplies standard phrasing and reporting conventions. It never adds,
+   removes or modifies a finding.
+2. NO CITATIONS. Do not write [1], (1), or a bare number anywhere in the
+   report. The interface displays sources beside the draft; a clinical
+   document carries none.
+3. Do not add a "References" or "Sources" section.
+
+FORMATTING:
+- Plain clinical prose under **FINDINGS** and **IMPRESSION** headings.
+- No tables, no preamble, no commentary about what you did.
+""".strip()
+
+
 # ── Q&A / Decision Support prompts (audience-keyed) ──
 # The register changes; the grounding rules don't.
 QA_SYSTEM_PROMPTS: dict[str, str] = {
@@ -116,15 +155,195 @@ QA_SYSTEM_PROMPTS: dict[str, str] = {
 }
 
 
-# ── Report Generation prompt ──
-# Strictly clinical register — output goes into a medical record.
-REPORT_SYSTEM_PROMPT = (
-    "You are RadAssist AI generating a radiology report section. Output "
-    "ONLY the report text — no preamble, no explanation, no hedging prose. "
-    "Use standard radiology reporting conventions: terse declarative "
-    "sentences, standard terminology, structured format (Findings / "
-    "Impression). Cite evidence from context with inline [N] references."
-)
+# ── Report Analysis prompt (Phase 4) ──
+#
+# ⚠️  WHY THIS MODE EXISTS — A REAL FAILURE, NOT A HYPOTHETICAL.
+# A clinician uploaded a radiology report. The OCR'd text was appended to the
+# user's question, so as far as the model was concerned the CONTEXT — the
+# retrieved research papers — was authoritative and the patient's own report
+# was loose material to paraphrase. Exactly backwards.
+#
+# The output inverted a finding ("hyperlordotic" → "hypolordotic"), invented a
+# range ("25-50%" from a paper discussing "25% of vertebral volume" when the
+# report said 50%), and relocated a T12 fracture to "the lumbar spine".
+#
+# The fix is positional, not a matter of asking more nicely: the uploaded
+# document is placed FIRST and named as the primary source, and the retrieved
+# literature is demoted to background. It also means the assistant works for
+# ANY findings — including ones absent from the knowledge base — because it is
+# reading the document rather than searching for it.
+REPORT_ANALYSIS_PROMPT = """
+You are RadAssist AI, helping a clinician interpret a radiology report they
+have uploaded.
+
+THE UPLOADED DOCUMENT IS THE PRIMARY SOURCE. These rules override everything
+else, including the retrieved literature:
+
+1. NEVER contradict the uploaded document. If it says "hyperlordotic", the
+   spine is hyperlordotic — do not substitute a term that seems more likely.
+2. QUOTE findings faithfully. Write what the document says, then explain it.
+   Do not paraphrase a measurement, a vertebral level, or a laterality.
+   Obvious scanning typos may be silently repaired when quoting — see rule 5.
+3. NEVER alter a number. If the document says 50%, write 50% — not "25-50%",
+   not "approximately half". Numbers come from the document alone, never from
+   the background literature.
+4. The document may describe findings absent from the background literature.
+   That is normal and expected. Report them from the document; simply say
+   background context isn't available rather than substituting something
+   similar.
+5. SCANNING TYPOS: FIX THEM SILENTLY. FLAG ONLY WHAT COULD CHANGE CARE.
+   The document was read by OCR, so it contains misspellings. The clinician
+   wrote this report and does not need spelling corrections read back. Sort
+   every damaged word into one of two bins:
+
+   (a) NO CLINICAL WEIGHT — exactly one sensible reading exists, and being
+       wrong would change nothing. Repair it silently. Do not mention it, do
+       not footnote it, do not write "(likely ...)".
+           "ts" → is        "solt tissues" → soft tissues
+           "peivis" → pelvis        "hyperlardosis" → hyperlordosis
+           "tracture" → fracture
+
+   (b) CLINICALLY LOAD-BEARING — a competing reading exists and it would
+       change the finding, the level, the measurement, or the management.
+       Never resolve these yourself. Quote what the document shows and say
+       plainly that it is unclear.
+           direction    hyper- vs hypo-, increased vs decreased
+           laterality   left vs right
+           level        "Tz" — T2? T12? Say which readings are possible.
+           numbers      any digit that could be misread
+           mechanism    "Tracompression" — traumatic? T12? Both change the
+                        work-up, so choose neither.
+
+   The test is not "am I confident?" — it is "if I am wrong, does the
+   clinician do something different?" If yes, flag it. If no, fix it and move
+   on.
+
+6. STATE NOTHING ABOUT THE PATIENT THE DOCUMENT DOES NOT. No age, no sex, no
+   menopausal status, no mechanism of injury, no symptoms, no prior history.
+   If the document says "post-menopausal osteoporosis", that is the document's
+   statement — do not build on it with "common in women of this age".
+
+   TWO THAT KEEP LEAKING IN FROM THE BACKGROUND LITERATURE:
+
+   ACUITY. Do not write "acute", "chronic", "recent" or "old" unless the
+   document does. Acute and chronic vertebral fractures are managed
+   differently — the acute one may warrant intervention, the old one usually
+   does not. Most published fracture-imaging studies are cohorts of ACUTE
+   fractures, so the word is everywhere in your background and almost never
+   in the report.
+
+   SYMPTOMS. Do not refer to pain, weakness, numbness or any complaint the
+   document does not record. Never write "the current pain" for a report that
+   never mentions pain; you do not know why the study was ordered.
+
+   The literature describes OTHER patients. Nothing in it is a fact about
+   this one.
+7. Add a short **Text quality** note ONLY IF bin (b) is non-empty — list those
+   words and nothing else, two or three lines at most. If every damaged word
+   fell into bin (a), omit the section entirely and say nothing about OCR.
+
+The retrieved literature below is BACKGROUND ONLY — use it to add context to
+findings the document already states, never to add, alter, or contradict a
+finding. If no retrieved source genuinely supports a finding, leave the
+background blank rather than citing something loosely related. An honest gap
+is more useful than a citation that does not hold up.
+
+STRUCTURE YOUR ANSWER:
+- **Findings as reported** — quote the document, one finding per line
+- **What these mean** — plain explanation, citing background [N] where useful
+- **Noted in the report** — the report's own impressions and recommendations
+- **Text quality** — ONLY IF words in bin (b) exist. Otherwise omit it.
+
+Write for a clinician reading their own report. Lead with the medicine. Text
+quality is a footnote when it matters and absent when it doesn't — never the
+subject of the answer.
+
+Never state a diagnosis of your own. The report's author has already made the
+clinical judgement; your role is to make it legible and add context.
+""".strip()
+
+
+# ── Report Generation prompt (Phase 3 deliverable, wired up in Phase 5) ──
+#
+# ⚠️  THE INPUT IS THE CLINICIAN'S OWN OBSERVATION, NOT A QUESTION.
+# In qa mode the corpus is authoritative and the user is asking. Here it is
+# reversed: the radiologist has looked at the study and is dictating what they
+# saw. The corpus supplies phrasing conventions and context — it must never
+# contribute a finding.
+#
+# This is the same authority ordering that had to be fixed for uploaded
+# documents in Phase 4, arrived at from the opposite direction.
+REPORT_SYSTEM_PROMPT = """
+You are RadAssist AI, drafting a radiology report from findings a radiologist
+has just dictated. The output goes into a medical record.
+
+THE DICTATED FINDINGS ARE THE ONLY SOURCE OF CLINICAL CONTENT.
+
+1. NEVER ADD A FINDING. If the radiologist did not mention the lung bases,
+   the report says nothing about the lung bases. Do not complete the study
+   with the findings a report of this type usually contains. An unstated
+   normal is not a normal — it is an unexamined region, and writing
+   "no pleural effusion" for something never assessed is a fabricated
+   negative in a legal document.
+
+2. NEVER ALTER A NUMBER, LEVEL OR LATERALITY. 8mm stays 8mm. T12 stays T12.
+   Left stays left. These come from the dictation alone, never from the
+   retrieved literature.
+
+3. NEVER STATE A DIAGNOSIS THE RADIOLOGIST DID NOT. You may organise their
+   observations into an Impression and use standard terminology for what they
+   described. You may not conclude.
+
+4. USE THE CONTEXT FOR LANGUAGE, NOT FOR CONTENT. Retrieved sources supply
+   standard phrasing, classification systems and reporting conventions. They
+   never contribute a finding.
+
+5. NO INLINE CITATIONS ANYWHERE IN THE REPORT BODY. This is the one place in
+   the system where [N] markers are forbidden. A radiology report is a
+   clinical document, and a trailing number after a finding reads as a grade
+   or a measurement:
+
+       "Mild cardiomegaly 4"     ← looks like a severity score
+       "Mild cardiomegaly [4]"   ← still not something you file in a record
+
+   The evidence panel already carries every source. Traceability is preserved
+   there, where it belongs, and out of a document a clinician may paste into
+   a patient's chart.
+
+6. IF THE FINDINGS ARE TOO SPARSE to structure, say so plainly and ask what
+   is missing. Do not pad a two-line dictation into a full report.
+
+FORMAT:
+- Terse declarative sentences. Standard radiology register.
+- **FINDINGS** then **IMPRESSION**.
+
+- FINDINGS: one line per observation, in anatomical order, phrased as the
+  radiologist described them.
+
+- IMPRESSION: SYNTHESIS, NOT A RESTATEMENT. This is the part a referring
+  clinician reads, and repeating the findings list back adds nothing.
+    * Combine related observations into a single clinical statement.
+    * Include a normal ONLY where its absence is clinically meaningful —
+      "no pleural effusion" earns a place beside cardiomegaly because it
+      argues against decompensation. "Clear lung fields" alone does not.
+    * Order by significance, not by the order dictated.
+    * If everything dictated is a single finding, the impression is one line.
+      Do not manufacture items to fill a list.
+
+  Dictated:  Mild cardiomegaly. No pleural effusion. Clear lung fields.
+             Degenerative changes of the thoracic spine.
+  Impression: 1. Mild cardiomegaly without pulmonary oedema or pleural
+                 effusion.
+              2. Degenerative change of the thoracic spine.
+  NOT:        four numbered lines repeating all four findings.
+
+- No preamble, no explanation, no conversational hedging.
+- End with: *Draft for radiologist review - not a final report.*
+
+That closing line is not decoration. This system produces drafts for a human
+to approve, and an output that omits the label can be pasted into a record as
+though it were signed.
+""".strip()
 
 
 # Minimum Qdrant similarity score to consider a chunk relevant.
@@ -177,6 +396,12 @@ DEFAULT_RETRIEVAL_LIMIT = settings.RETRIEVAL_LIMIT
 # We over-fetch, cap, then trim back to `limit`.
 MAX_CHUNKS_PER_DOCUMENT = settings.MAX_CHUNKS_PER_DOCUMENT
 _OVERFETCH_FACTOR = 4
+
+# How many document-derived terms to search with when a file is attached.
+# Enough to characterise a report's subject matter (region, modality, the
+# handful of named findings), few enough to stay inside the embedding model's
+# 256-wordpiece window with the user's own question alongside it.
+_DOC_QUERY_TERMS = 24
 
 
 # ══════════════════════════════════════════════════════════════
@@ -501,6 +726,8 @@ class RAGService:
         query: str,
         limit: int = DEFAULT_RETRIEVAL_LIMIT,
         source_type: str | None = None,
+        attached_text: str | None = None,
+        attached_warnings: list[str] | None = None,
     ) -> list[RetrievedChunk]:
         """
         Embed the query and search Qdrant for relevant chunks.
@@ -518,6 +745,17 @@ class RAGService:
         happens on every single chat message rather than on occasional uploads,
         so under any concurrency it serialises the whole application.
         """
+        # ── Stage 0: what are we actually searching FOR? ──
+        # With a document attached, the user's words are an instruction
+        # ("review this"), not a description of the subject matter. Searching
+        # the instruction retrieves papers about reviewing reports. Search the
+        # DOCUMENT instead. See _build_document_query().
+        search_query = query
+        if attached_text:
+            search_query = await run_in_threadpool(
+                self._build_document_query, query, attached_text
+            )
+
         # ── Stage 1: RECALL — vector + lexical, unioned ──
         # Two retrievers with near-orthogonal failure modes. Embeddings find
         # passages that are ABOUT the topic; BM25 finds passages containing
@@ -529,16 +767,16 @@ class RAGService:
             limit,
         )
         candidates = await run_in_threadpool(
-            self._retrieve_sync, query, n_candidates, source_type
+            self._retrieve_sync, search_query, n_candidates, source_type
         )
         candidates = await self._add_lexical_candidates(
-            query, candidates, source_type
+            search_query, candidates, source_type
         )
         if not candidates:
             return []
 
         # ── Stage 2: cross-encoder rerank for PRECISION ──
-        candidates = await self._rerank(query, candidates)
+        candidates = await self._rerank(search_query, candidates)
 
         # ── Stage 3: diversity cap, THEN trim ──
         # ⚠️  ORDER MATTERS, AND IT CHANGED IN PHASE 3.5.
@@ -553,6 +791,60 @@ class RAGService:
 
         # Collapse overlapping neighbours before the LLM ever sees them.
         return merge_adjacent_chunks(diverse)
+
+    @staticmethod
+    def _ensure_lexical_index() -> None:
+        """Build (or rebuild after ingestion) the BM25 index. Blocking."""
+        if not lexical_index.is_built:
+            records = qdrant_service.iter_all_chunks()
+            if records:
+                lexical_index.build(records)
+
+    def _build_document_query(self, query: str, attached_text: str) -> str:
+        """
+        Derive the retrieval query from an uploaded document. Blocking.
+
+        ⚠️  THE BUG THIS FIXES.
+        A clinician uploaded a spine report and typed a generic instruction.
+        Retrieval embedded the instruction, so all twelve retrieved sources
+        were papers about *the practice of radiology reporting* — reporting
+        errors, structured-reporting templates, NLP reporting quality. Not one
+        concerned osteopenia, vertebral compression or spinal curvature. The
+        model cited [1] for every row of its table because no source genuinely
+        supported any of them.
+
+        The document is what the answer is about, so the document is what we
+        search with. `salient_terms` scores it by TF-IDF against the live
+        corpus, which drops boilerplate ("report", "findings") and OCR garbage
+        ("hyperiordotic", "peivis") in one pass.
+
+        The user's own words are kept: when they ask something specific rather
+        than "review this", that intent should still steer retrieval. Generic
+        instructions wash out on their own — their terms carry near-zero IDF.
+
+        Falls back to the original query on any failure. Retrieval quality is
+        an enhancement here; the document itself is already the primary source
+        in the prompt, so a bad query degrades the background section rather
+        than the answer.
+        """
+        try:
+            self._ensure_lexical_index()
+            terms = lexical_index.salient_terms(
+                attached_text, top_k=_DOC_QUERY_TERMS
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not derive query from document: %s", e)
+            terms = []
+
+        if not terms:
+            # No corpus statistics available (hybrid disabled, empty index, or
+            # a document sharing no vocabulary with the corpus). The opening
+            # of a report carries the modality, region and headline finding,
+            # which still beats searching the instruction alone.
+            return f"{query} {attached_text[:400]}".strip()
+
+        logger.info("Document-derived retrieval terms: %s", " ".join(terms))
+        return f"{query} {' '.join(terms)}".strip()
 
     async def _add_lexical_candidates(
         self,
@@ -576,11 +868,9 @@ class RAGService:
 
         def _lexical_work() -> list[RetrievedChunk]:
             # Build (or rebuild after ingestion) on first use.
+            self._ensure_lexical_index()
             if not lexical_index.is_built:
-                records = qdrant_service.iter_all_chunks()
-                if not records:
-                    return []
-                lexical_index.build(records)
+                return []
 
             hits = lexical_index.search(query, limit=settings.LEXICAL_CANDIDATES)
             if source_type:
@@ -667,6 +957,8 @@ class RAGService:
         *,
         mode: str = "qa",
         audience: str = "radiologist",
+        attached_text: str | None = None,
+        attached_warnings: list[str] | None = None,
     ) -> list[dict]:
         """
         Assemble the full message list for the LLM.
@@ -681,6 +973,12 @@ class RAGService:
         # ── Select the mode-specific system prompt ──
         if mode == "report":
             role_prompt = REPORT_SYSTEM_PROMPT
+        elif mode == "report_analysis" or attached_text:
+            # An uploaded document changes the task fundamentally: the model
+            # is reading a specific patient's report, not answering from a
+            # corpus. See REPORT_ANALYSIS_PROMPT for what went wrong when
+            # this distinction wasn't made.
+            role_prompt = REPORT_ANALYSIS_PROMPT
         else:
             role_prompt = QA_SYSTEM_PROMPTS.get(
                 audience,
@@ -709,8 +1007,44 @@ class RAGService:
                 "knowledge base for this query."
             )
 
-        # ── Assemble the system message ──
-        system_content = f"{role_prompt}\n\n{GROUNDING_SCAFFOLD}\n{context_block}"
+        # ── Uploaded document goes FIRST, above the literature ──
+        # Position is the fix. Appending it to the user's question made the
+        # model treat retrieved papers as authoritative and the patient's
+        # own report as loose material — which inverted a finding.
+        document_block = ""
+        if attached_text:
+            caveat = ""
+            if attached_warnings:
+                caveat = (
+                    "\n\n⚠️  TEXT QUALITY WARNINGS — the document was read by OCR "
+                    "and may contain character errors:\n"
+                    + "\n".join(f"  - {w}" for w in attached_warnings)
+                    + "\nApply rule 5: repair harmless misspellings silently, "
+                    "and flag only the words where a competing reading would "
+                    "change the finding, level, number or management."
+                )
+            document_block = (
+                "\n\n" + "=" * 60 + "\n"
+                "UPLOADED DOCUMENT — THE PRIMARY SOURCE\n"
+                + "=" * 60 + "\n"
+                + attached_text
+                + "\n" + "=" * 60
+                + "\nEND OF UPLOADED DOCUMENT" + caveat + "\n"
+            )
+
+        # ⚠️  THE SCAFFOLD MUST MATCH THE MODE.
+        # GROUNDING_SCAFFOLD mandates a citation on every claim. Appending it
+        # to REPORT_SYSTEM_PROMPT — which forbids citations in the report body
+        # — gave the model two contradictory instructions, and the longer,
+        # more detailed one won. Drafts came back reading "Mild cardiomegaly. 1".
+        scaffold = (
+            REPORT_GROUNDING_SCAFFOLD if mode == "report" else GROUNDING_SCAFFOLD
+        )
+
+        system_content = (
+            f"{role_prompt}\n\n{scaffold}"
+            f"{document_block}\n{context_block}"
+        )
 
         return [
             {"role": "system", "content": system_content},
@@ -741,6 +1075,8 @@ class RAGService:
         audience: str = "radiologist",
         limit: int = DEFAULT_RETRIEVAL_LIMIT,
         source_type: str | None = None,
+        attached_text: str | None = None,
+        attached_warnings: list[str] | None = None,
     ) -> RAGResult:
         """
         Full RAG pipeline: retrieve → build prompt → generate.
@@ -750,7 +1086,13 @@ class RAGService:
         """
         # 0. Cheap out-of-scope check — costs nothing, skips embedding +
         #    Qdrant + LLM entirely for obviously non-medical queries.
-        if is_out_of_scope(query):
+        #    Never applied when a document is attached: the instruction may be
+        #    as bare as "have a look", and refusing to read an uploaded report
+        #    on the strength of the covering sentence would be absurd.
+        # Report mode is exempt too: dictated findings are terse clinical
+        # fragments, not questions, and "Mild cardiomegaly. No effusion."
+        # should never be tested against a conversational scope filter.
+        if mode == "qa" and not attached_text and is_out_of_scope(query):
             logger.info("Out-of-scope query rejected without LLM call: %s", query)
             return RAGResult(
                 answer=OUT_OF_SCOPE_REPLY,
@@ -759,10 +1101,20 @@ class RAGService:
             )
 
         # 1. Retrieve context from Qdrant.
-        context = await self.retrieve_context(query, limit=limit, source_type=source_type)
+        context = await self.retrieve_context(
+            query, limit=limit, source_type=source_type,
+            attached_text=attached_text,
+        )
 
         # 2. Check relevance — if nothing relevant, short-circuit.
-        if not self._has_relevant_context(context):
+        # UNLESS a document was uploaded: the model is reading THAT, and
+        # weak corpus coverage is irrelevant to whether it can do so.
+        # Report mode is exempt for the same reason an attachment is: the
+        # clinical content comes from the dictation, not the corpus. Refusing
+        # to draft a report because the knowledge base has nothing similar
+        # would make the feature fail on exactly the unusual findings where a
+        # structured draft is most useful.
+        if mode != "report" and not attached_text and not self._has_relevant_context(context):
             logger.info("No relevant context for query: %s (best score: %.3f)",
                         query, context[0].score if context else 0.0)
             return RAGResult(
@@ -779,6 +1131,7 @@ class RAGService:
         # 3. Build the prompt.
         messages = self.build_messages(
             query, context, mode=mode, audience=audience,
+            attached_text=attached_text, attached_warnings=attached_warnings,
         )
 
         # 4. Generate the answer.
@@ -802,6 +1155,8 @@ class RAGService:
         audience: str = "radiologist",
         limit: int = DEFAULT_RETRIEVAL_LIMIT,
         source_type: str | None = None,
+        attached_text: str | None = None,
+        attached_warnings: list[str] | None = None,
     ) -> tuple[list[RetrievedChunk], AsyncIterator[str]]:
         """
         Streaming RAG pipeline: retrieve → build prompt → stream tokens.
@@ -814,8 +1169,12 @@ class RAGService:
         If no relevant context is found, the stream yields the "I don't
         have enough information" message and stops.
         """
-        # 0. Out-of-scope check (see answer() for rationale).
-        if is_out_of_scope(query):
+        # 0. Out-of-scope check (see answer() for rationale, including why an
+        #    attached document bypasses it).
+        # Report mode is exempt too: dictated findings are terse clinical
+        # fragments, not questions, and "Mild cardiomegaly. No effusion."
+        # should never be tested against a conversational scope filter.
+        if mode == "qa" and not attached_text and is_out_of_scope(query):
             logger.info("Out-of-scope query rejected without LLM call: %s", query)
 
             async def _out_of_scope_stream() -> AsyncIterator[str]:
@@ -824,10 +1183,18 @@ class RAGService:
             return [], _out_of_scope_stream()
 
         # 1. Retrieve context.
-        context = await self.retrieve_context(query, limit=limit, source_type=source_type)
+        context = await self.retrieve_context(
+            query, limit=limit, source_type=source_type,
+            attached_text=attached_text,
+        )
 
-        # 2. Check relevance.
-        if not self._has_relevant_context(context):
+        # 2. Check relevance (skipped when a document was uploaded — see answer()).
+        # Report mode is exempt for the same reason an attachment is: the
+        # clinical content comes from the dictation, not the corpus. Refusing
+        # to draft a report because the knowledge base has nothing similar
+        # would make the feature fail on exactly the unusual findings where a
+        # structured draft is most useful.
+        if mode != "report" and not attached_text and not self._has_relevant_context(context):
             logger.info("No relevant context (streaming) for: %s", query)
 
             async def _no_context_stream() -> AsyncIterator[str]:
@@ -843,6 +1210,7 @@ class RAGService:
         # 3. Build prompt.
         messages = self.build_messages(
             query, context, mode=mode, audience=audience,
+            attached_text=attached_text, attached_warnings=attached_warnings,
         )
 
         # 4. Stream the answer, normalising citation brackets per token.

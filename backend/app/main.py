@@ -35,7 +35,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.api.v1.router import api_v1_router
-from app.core.database import engine, Base
+from app.core.database import engine
 from app.models import Document  # noqa: F401 — Import so SQLAlchemy discovers it
 from app.services.embedding import embedding_service
 from app.services.qdrant_service import qdrant_service
@@ -67,10 +67,38 @@ async def lifespan(app: FastAPI):
     print("="  * 50)
     
     # ── Phase 1: Database ────────────────────────────────────
-    # Create database tables from our models (including new 'documents' table)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    print("✅ Database tables created/verified")
+    # ⚠️  create_all() WAS REMOVED HERE IN PHASE 4 STEP 0.
+    #
+    # It creates tables but never ALTERS them. Add a column to a model and
+    # create_all does nothing — silently. No error, no change; the app then
+    # fails at query time with a missing-column error that points nowhere
+    # near the cause. That's the same class of silent failure that has bitten
+    # this project repeatedly.
+    #
+    # Schema changes now go through Alembic:
+    #     docker-compose exec backend alembic revision --autogenerate -m "..."
+    #     docker-compose exec backend alembic upgrade head
+    #
+    # Migrations are applied by the container's start command, before uvicorn
+    # boots, so the app never runs against a schema it wasn't built for. This
+    # block only VERIFIES that they ran.
+    try:
+        async with engine.connect() as conn:
+            version = await conn.scalar(
+                text("SELECT version_num FROM alembic_version LIMIT 1")
+            )
+        if version:
+            print(f"✅ Database schema at migration: {version}")
+        else:
+            print("⚠️  alembic_version is empty — run: alembic upgrade head")
+    except Exception:
+        print("=" * 50)
+        print("⚠️  No alembic_version table — migrations have not been applied.")
+        print("")
+        print("   The app may be running against a schema it wasn't built for.")
+        print("   Apply them with:")
+        print("       docker-compose exec backend alembic upgrade head")
+        print("=" * 50)
     
     # Verify database connection
     try:
@@ -115,6 +143,10 @@ async def lifespan(app: FastAPI):
     # Create the directory where uploaded files are temporarily saved.
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     print(f"✅ Upload directory ready: {settings.UPLOAD_DIR}")
+
+    # ── Phase 4: Image storage ───────────────────────────────
+    os.makedirs(settings.IMAGE_DIR, exist_ok=True)
+    print(f"✅ Image directory ready: {settings.IMAGE_DIR}")
 
     # ── Phase 3: LLM Provider ────────────────────────────────
     # Report which providers have keys. We deliberately do NOT make a live

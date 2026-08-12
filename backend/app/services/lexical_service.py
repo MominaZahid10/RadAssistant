@@ -235,6 +235,63 @@ class LexicalIndex:
             results.append(rec)
         return results
 
+    # ── Salient terms ────────────────────────────────────────
+
+    def salient_terms(self, text: str, top_k: int = 24) -> list[str]:
+        """
+        The most distinctive corpus-known terms in `text`, strongest first.
+
+        Used to build a retrieval query from an UPLOADED DOCUMENT rather than
+        from the user's instruction.
+
+        ⚠️  WHY THIS EXISTS.
+        A clinician uploads a report and types "review this". Retrieval
+        embedded *that* — and dutifully returned papers about the practice of
+        radiology reporting: "Revealing the most common reporting errors",
+        "The reporting quality of NLP studies". Every source was about
+        reports-as-a-genre; not one was about the patient's osteopenia or
+        compression fracture. The background section was decorative, and the
+        model cited [1] for everything because nothing actually supported
+        anything.
+
+        Scoring is TF-IDF against the live index, which buys two things free:
+
+        1. STOPWORD AND BOILERPLATE REMOVAL. "report", "findings", "patient"
+           appear in nearly every chunk, so their IDF is near zero and they
+           sink. No hand-maintained medical stoplist to keep current.
+
+        2. OCR GARBAGE REMOVAL. Terms absent from the corpus are dropped
+           outright. On the report that motivated this, that discards
+           "hyperiordotic", "peivis", "solt" and "tracompression" — misreads
+           that would otherwise be the highest-IDF terms in the document,
+           since nothing is rarer than a word that does not exist.
+
+        The cost is that a genuinely novel finding — real, but absent from the
+        corpus — is also dropped. That is the right trade: an unknown term
+        cannot retrieve anything anyway, and the document itself still reaches
+        the model as the primary source. This only shapes what BACKGROUND gets
+        pulled alongside it.
+        """
+        if not self._built or self._n_docs == 0:
+            return []
+
+        tokens = tokenize(text)
+        if not tokens:
+            return []
+
+        scored: list[tuple[float, str]] = []
+        for term, freq in Counter(tokens).items():
+            df = self._doc_freq.get(term, 0)
+            if not df:
+                continue        # not in the corpus: OCR noise, or unretrievable
+            idf = math.log(1 + (self._n_docs - df + 0.5) / (df + 0.5))
+            # Sub-linear TF: a term repeated six times is more central than one
+            # mentioned once, but not six times more.
+            scored.append((idf * (1.0 + math.log(freq)), term))
+
+        scored.sort(reverse=True)
+        return [term for _, term in scored[:top_k]]
+
 
 # ══════════════════════════════════════════════════════════════
 # SINGLETON

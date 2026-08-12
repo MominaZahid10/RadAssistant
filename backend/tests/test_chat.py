@@ -379,3 +379,218 @@ def _parse_sse_events(body: str) -> list[dict]:
         })
 
     return events
+
+
+# ══════════════════════════════════════════════════════════════
+# TESTS: Report mode (Phase 5, Step 0)
+# ══════════════════════════════════════════════════════════════
+#
+# ⚠️  WHY THESE EXIST.
+# REPORT_SYSTEM_PROMPT and rag_service's mode="report" branch were written in
+# Phase 3 and supported throughout — but chat.py hardcoded mode="qa" at both
+# call sites, so no request could ever reach them. Report generation, the
+# project's headline feature and the stated Phase 3 deliverable, was
+# unreachable code for two phases and nothing failed.
+#
+# Every test here asserts the WIRING, not the prompt. A prompt nothing can
+# invoke is worth exactly nothing.
+
+
+class TestChatMode:
+    def test_mode_defaults_to_qa(self, client, mock_rag_service):
+        client.post("/api/v1/chat", json={"query": "test", "stream": False})
+        assert mock_rag_service.answer.call_args.kwargs.get("mode") == "qa"
+
+    def test_report_mode_reaches_the_service(self, client, mock_rag_service):
+        """The regression this whole step exists to prevent."""
+        client.post(
+            "/api/v1/chat",
+            json={"query": "Mild cardiomegaly.", "stream": False, "mode": "report"},
+        )
+        assert mock_rag_service.answer.call_args.kwargs.get("mode") == "report"
+
+    def test_report_mode_reaches_the_service_when_streaming(
+        self, client, mock_rag_service, mock_llm_service
+    ):
+        """Both call sites were hardcoded. Both must be covered."""
+        with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={"query": "Mild cardiomegaly.", "stream": True, "mode": "report"},
+        ) as response:
+            list(response.iter_lines())
+        assert mock_rag_service.answer_stream.call_args.kwargs.get("mode") == "report"
+
+    def test_unknown_mode_is_rejected_not_silently_downgraded(self, client):
+        """
+        ⚠️  A 422 IS THE POINT.
+        Falling back to "qa" would mean a clinician who asked for a report
+        gets a chat answer, with no error anywhere in the system. That is the
+        same silent substitution that inverted a clinical finding in Phase 4:
+        something reasonable-looking happened instead of what was asked for.
+        """
+        response = client.post(
+            "/api/v1/chat",
+            json={"query": "test", "stream": False, "mode": "summary"},
+        )
+        assert response.status_code == 422
+
+
+class TestReportPrompt:
+    """The prompt's clinical safety rules, asserted so they cannot be edited away."""
+
+    def test_report_prompt_forbids_adding_unstated_findings(self):
+        from app.services.rag_service import REPORT_SYSTEM_PROMPT
+
+        p = REPORT_SYSTEM_PROMPT
+        assert "NEVER ADD A FINDING" in p
+        # The specific danger: completing a study with its usual normals.
+        assert "fabricated" in p
+        assert "no pleural effusion" in p
+
+    def test_report_prompt_protects_numbers_levels_and_laterality(self):
+        from app.services.rag_service import REPORT_SYSTEM_PROMPT
+
+        p = REPORT_SYSTEM_PROMPT
+        assert "NEVER ALTER A NUMBER, LEVEL OR LATERALITY" in p
+        assert "8mm stays 8mm" in p
+
+    def test_report_prompt_separates_language_from_content(self):
+        """Context supplies phrasing; it must never contribute a finding."""
+        from app.services.rag_service import REPORT_SYSTEM_PROMPT
+
+        assert "USE THE CONTEXT FOR LANGUAGE, NOT FOR CONTENT" in REPORT_SYSTEM_PROMPT
+
+    def test_report_prompt_requires_the_draft_label(self):
+        """
+        The project document states this as a design constraint: the system
+        produces drafts only and must make the human-in-the-loop explicit.
+        An unlabelled output can be pasted into a record as though signed.
+        """
+        from app.services.rag_service import REPORT_SYSTEM_PROMPT
+
+        assert "Draft for radiologist review" in REPORT_SYSTEM_PROMPT
+
+    def test_report_mode_selects_the_report_prompt(self):
+        from app.services.rag_service import (
+            REPORT_SYSTEM_PROMPT,
+            RAGService,
+            RetrievedChunk,
+        )
+
+        messages = RAGService().build_messages(
+            "Mild cardiomegaly. No pleural effusion.",
+            [RetrievedChunk(chunk_id=1, text="Cardiomegaly is defined as...",
+                            score=0.8, document_title="Chest imaging")],
+            mode="report",
+        )
+        assert REPORT_SYSTEM_PROMPT in messages[0]["content"]
+
+
+class TestReportPromptOutputRules:
+    """
+    ⚠️  DEFECTS OBSERVED IN THE FIRST REAL DRAFT.
+    The wiring worked; the output had three problems, two of them clinical:
+
+      "* Mild cardiomegaly 4"   a citation rendering as a bare number, which
+                                in a medical record reads as a severity grade
+      IMPRESSION 1-4            a 1:1 restatement of the findings list, with
+                                normals ("Clear lung fields") given their own
+                                numbered impression items
+    """
+
+    def test_inline_citations_are_forbidden_in_the_report_body(self):
+        from app.services.rag_service import REPORT_SYSTEM_PROMPT
+
+        p = REPORT_SYSTEM_PROMPT
+        assert "NO INLINE CITATIONS ANYWHERE IN THE REPORT BODY" in p
+        # The observed rendering, kept as the worked example.
+        assert "Mild cardiomegaly 4" in p
+        assert "severity score" in p
+        # Traceability is not dropped, only relocated.
+        assert "evidence panel" in p.lower()
+
+    def test_impression_must_synthesise_not_restate(self):
+        from app.services.rag_service import REPORT_SYSTEM_PROMPT
+
+        p = REPORT_SYSTEM_PROMPT
+        assert "SYNTHESIS, NOT A RESTATEMENT" in p
+        assert "Do not manufacture items to fill a list" in p
+
+    def test_normals_need_to_earn_their_place_in_the_impression(self):
+        from app.services.rag_service import REPORT_SYSTEM_PROMPT
+
+        p = REPORT_SYSTEM_PROMPT
+        assert "clinically meaningful" in p
+        # "no pleural effusion" belongs beside cardiomegaly; "clear lung
+        # fields" on its own does not.
+        assert "Clear lung fields" in p
+
+    def test_prompt_carries_a_worked_example(self):
+        """An abstract rule about synthesis is easy to comply with nominally."""
+        from app.services.rag_service import REPORT_SYSTEM_PROMPT
+
+        p = REPORT_SYSTEM_PROMPT
+        assert "Dictated:" in p and "Impression:" in p and "NOT:" in p
+
+
+class TestScaffoldMatchesMode:
+    """
+    ⚠️  CONTRADICTORY INSTRUCTIONS DO NOT AVERAGE OUT.
+    GROUNDING_SCAFFOLD was appended to every mode. In report mode that put
+    "NO INLINE CITATIONS ANYWHERE IN THE REPORT BODY" two lines above "Every
+    factual claim MUST have at least one citation" plus a CITATION FORMAT
+    block. The longer, more specific instruction won, and drafts came back
+    reading "Mild cardiomegaly. 1" — a bare number that in a medical record
+    reads as a severity grade.
+
+    You do not get to choose which of two conflicting rules the model obeys.
+    The only fix is not to send both.
+    """
+
+    def _system(self, mode: str) -> str:
+        from app.services.rag_service import RAGService, RetrievedChunk
+
+        return RAGService().build_messages(
+            "Mild cardiomegaly.",
+            [RetrievedChunk(chunk_id=1, text="Cardiomegaly is CTR > 0.5.",
+                            score=0.8, document_title="Chest imaging")],
+            mode=mode,
+        )[0]["content"]
+
+    def test_report_mode_does_not_receive_the_citation_mandate(self):
+        system = self._system("report")
+        assert "Every factual claim MUST have at least one citation" not in system
+        assert "CITATION FORMAT" not in system
+
+    def test_report_mode_receives_its_own_scaffold(self):
+        from app.services.rag_service import REPORT_GROUNDING_SCAFFOLD
+
+        assert REPORT_GROUNDING_SCAFFOLD in self._system("report")
+
+    def test_report_scaffold_forbids_bare_numbers_too(self):
+        """[1] was banned; the model then emitted '1'. Both are excluded."""
+        from app.services.rag_service import REPORT_GROUNDING_SCAFFOLD
+
+        assert "bare number" in REPORT_GROUNDING_SCAFFOLD
+
+    def test_report_mode_drops_the_answer_only_from_context_rule(self):
+        """
+        Wrong for a report: the clinical content comes from the dictation,
+        not the corpus.
+        """
+        system = self._system("report")
+        assert "Answer ONLY from the CONTEXT" not in system
+
+    def test_report_mode_drops_the_differential_framing_rule(self):
+        """A report states findings; it is not a differential discussion."""
+        system = self._system("report")
+        assert "differential considerations" not in system
+
+    def test_qa_mode_still_gets_the_full_grounding_scaffold(self):
+        """Regression guard: the fix must not weaken the Q&A path."""
+        from app.services.rag_service import GROUNDING_SCAFFOLD
+
+        system = self._system("qa")
+        assert GROUNDING_SCAFFOLD in system
+        assert "Every factual claim MUST have at least one citation" in system

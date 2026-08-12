@@ -31,7 +31,7 @@ error BEFORE our code even runs. FastAPI uses Pydantic schemas to:
 
 from datetime import datetime
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ══════════════════════════════════════════════════════════════
@@ -65,11 +65,7 @@ class DocumentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        # Tells Pydantic to read data from SQLAlchemy model attributes
-        # (not just dictionaries). Without this, we'd have to manually
-        # convert every database object to a dict before returning it.
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class DocumentListResponse(BaseModel):

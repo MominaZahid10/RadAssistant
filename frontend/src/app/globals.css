@@ -388,3 +388,259 @@ body {
 /* A markdown block still mid-stream (e.g. a table header with no divider
    row yet). Slightly dimmed so a half-formed line doesn't read as final. */
 .md-partial { opacity: 0.75; }
+
+/* ══════════════════════════════════════════════════════════════
+   Image library & viewer (Phase 4)
+   ══════════════════════════════════════════════════════════════ */
+
+.images-page { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+.images-header { margin-bottom: 1.25rem; }
+.images-title { font-size: 1.35rem; font-weight: 650; }
+.images-subtitle { font-size: 0.8rem; color: var(--foreground-muted, #8b8b8b); margin-top: 0.2rem; }
+.images-empty, .images-error { text-align: center; padding: 3rem 1rem; color: var(--foreground-muted, #8b8b8b); font-size: 0.875rem; }
+.images-error { color: var(--error, #ef4444); }
+
+/* ── Upload ── */
+.upload-panel { margin-bottom: 1.5rem; }
+.upload-types { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+.upload-type {
+  padding: 0.35rem 0.7rem; font-size: 0.75rem; border-radius: 0.4rem;
+  border: 1px solid var(--border, #2a2a2a); background: transparent;
+  color: var(--foreground-secondary, #b4b4b4); cursor: pointer; transition: all 0.15s;
+}
+.upload-type:hover:not(:disabled) { border-color: var(--accent, #3b82f6); }
+.upload-type.active { background: var(--accent, #3b82f6); color: #fff; border-color: var(--accent, #3b82f6); }
+.upload-type:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.dropzone {
+  border: 2px dashed var(--border, #2a2a2a); border-radius: 0.65rem;
+  padding: 2rem 1rem; text-align: center; cursor: pointer; transition: all 0.15s;
+}
+.dropzone:hover:not(.is-busy) { border-color: var(--accent, #3b82f6); }
+.dropzone.is-dragging { border-color: var(--accent, #3b82f6); background: color-mix(in srgb, var(--accent, #3b82f6) 7%, transparent); }
+.dropzone.is-busy { cursor: wait; opacity: 0.85; }
+.dropzone-icon { font-size: 1.8rem; margin-bottom: 0.4rem; }
+.dropzone-text { font-size: 0.875rem; }
+.dropzone-hint { font-size: 0.72rem; color: var(--foreground-muted, #8b8b8b); margin-top: 0.25rem; }
+.dropzone-spinner {
+  width: 22px; height: 22px; margin: 0 auto 0.6rem;
+  border: 2px solid color-mix(in srgb, var(--accent, #3b82f6) 30%, transparent);
+  border-top-color: var(--accent, #3b82f6); border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.upload-ok   { font-size: 0.8rem; color: var(--success, #22c55e); margin-top: 0.5rem; }
+.upload-err  { font-size: 0.8rem; color: var(--error, #ef4444); margin-top: 0.5rem; }
+.upload-note { font-size: 0.72rem; color: var(--foreground-muted, #8b8b8b); margin-top: 0.5rem; line-height: 1.5; }
+
+/* ── Filters ── */
+.images-filters { display: flex; gap: 0.4rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.images-filter {
+  padding: 0.3rem 0.7rem; font-size: 0.75rem; border-radius: 999px;
+  border: 1px solid var(--border, #2a2a2a); background: transparent;
+  color: var(--foreground-secondary, #b4b4b4); cursor: pointer;
+}
+.images-filter.active { background: var(--accent, #3b82f6); color: #fff; border-color: var(--accent, #3b82f6); }
+.images-filter-count { margin-left: 0.35rem; opacity: 0.7; font-variant-numeric: tabular-nums; }
+
+/* ── Grid ── */
+.images-grid {
+  display: grid; gap: 0.85rem;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+.image-card {
+  border: 1px solid var(--border, #2a2a2a); border-radius: 0.55rem;
+  overflow: hidden; background: transparent; cursor: pointer;
+  text-align: left; padding: 0; transition: border-color 0.15s, transform 0.1s;
+}
+.image-card:hover { border-color: var(--accent, #3b82f6); transform: translateY(-2px); }
+
+.image-card-thumb {
+  position: relative; aspect-ratio: 1; display: flex;
+  align-items: center; justify-content: center;
+  /* Dark surround: a bright frame compresses perceived contrast in the
+     greyscale range where radiographic findings live. */
+  background: #0a0a0a;
+}
+.image-card-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.image-card-placeholder { font-size: 1.6rem; opacity: 0.4; }
+
+.image-card-badge {
+  position: absolute; top: 0.35rem; left: 0.35rem; font-size: 0.7rem;
+  background: rgba(0,0,0,0.65); border-radius: 0.25rem; padding: 0.1rem 0.3rem;
+}
+.image-card-delete {
+  position: absolute; top: 0.35rem; right: 0.35rem;
+  width: 1.25rem; height: 1.25rem; display: flex; align-items: center;
+  justify-content: center; font-size: 0.7rem; border-radius: 0.25rem;
+  background: rgba(0,0,0,0.65); color: #fff; opacity: 0; transition: opacity 0.15s;
+}
+.image-card:hover .image-card-delete { opacity: 1; }
+.image-card-delete:hover { background: var(--error, #ef4444); }
+
+.image-card-body { padding: 0.5rem 0.6rem; }
+.image-card-name {
+  font-size: 0.75rem; font-weight: 550;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.image-card-meta { font-size: 0.68rem; color: var(--foreground-muted, #8b8b8b); margin-top: 0.1rem; text-transform: capitalize; }
+.image-card-error { font-size: 0.68rem; color: var(--error, #ef4444); margin-top: 0.15rem; }
+
+/* ── Viewer ── */
+.viewer-backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0,0,0,0.88); backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center; padding: 1.5rem;
+}
+.viewer-shell {
+  background: var(--background-secondary, #141414);
+  border: 1px solid var(--border, #2a2a2a); border-radius: 0.7rem;
+  max-width: min(1000px, 95vw); max-height: 92vh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.viewer-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 1rem; padding: 0.85rem 1rem; border-bottom: 1px solid var(--border, #2a2a2a);
+}
+.viewer-title { font-size: 0.875rem; font-weight: 600; }
+.viewer-caption { font-size: 0.75rem; color: var(--foreground-secondary, #b4b4b4); margin-top: 0.2rem; line-height: 1.5; }
+.viewer-close {
+  flex-shrink: 0; width: 1.6rem; height: 1.6rem; border-radius: 0.3rem;
+  border: 1px solid var(--border, #2a2a2a); background: transparent;
+  color: var(--foreground-secondary, #b4b4b4); cursor: pointer;
+}
+.viewer-close:hover { background: var(--error, #ef4444); color: #fff; }
+
+.viewer-stage {
+  flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+  background: #000; overflow: auto;
+}
+.viewer-stage img { max-width: 100%; max-height: 68vh; object-fit: contain; cursor: zoom-in; }
+.viewer-stage.is-zoomed { align-items: flex-start; }
+.viewer-stage.is-zoomed img { max-width: none; max-height: none; width: auto; cursor: zoom-out; }
+.viewer-empty { color: var(--foreground-muted, #8b8b8b); font-size: 0.8rem; padding: 3rem; }
+
+.viewer-meta {
+  display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem;
+  padding: 0.75rem 1rem; border-top: 1px solid var(--border, #2a2a2a);
+}
+.viewer-meta-item { display: flex; flex-direction: column; gap: 0.1rem; }
+.viewer-meta-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--foreground-muted, #8b8b8b); }
+.viewer-meta-value { font-size: 0.8rem; text-transform: capitalize; }
+.viewer-link { font-size: 0.8rem; color: var(--accent, #3b82f6); text-decoration: none; }
+.viewer-link:hover { text-decoration: underline; }
+
+.badge-safe { font-size: 0.78rem; color: var(--success, #22c55e); }
+.badge-warn { font-size: 0.78rem; color: var(--error, #ef4444); font-weight: 600; }
+
+.viewer-ocr { border-top: 1px solid var(--border, #2a2a2a); padding: 0.6rem 1rem; }
+.viewer-ocr summary { font-size: 0.75rem; cursor: pointer; color: var(--foreground-secondary, #b4b4b4); }
+.viewer-ocr pre {
+  margin-top: 0.5rem; max-height: 180px; overflow: auto;
+  font-size: 0.72rem; line-height: 1.55; white-space: pre-wrap;
+  color: var(--foreground-secondary, #b4b4b4);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Chat attachments (Phase 4)
+   ══════════════════════════════════════════════════════════════
+   Attach files from the composer, the way ChatGPT and Claude do — rather
+   than sending people to a separate library page and back. */
+
+.attach-button {
+  flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  width: 1.9rem; height: 1.9rem; border-radius: 0.45rem;
+  color: var(--foreground-muted, #8b8b8b);
+  background: transparent; border: none; cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.attach-button:hover:not(:disabled) {
+  color: var(--accent, #3b82f6);
+  background: color-mix(in srgb, var(--accent, #3b82f6) 12%, transparent);
+}
+.attach-button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Staged files, above the input */
+.attach-tray {
+  display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem;
+}
+.attach-chip {
+  position: relative; width: 4.5rem;
+}
+.attach-chip img {
+  width: 4.5rem; height: 4.5rem; object-fit: cover;
+  border-radius: 0.5rem; border: 1px solid var(--border, #2a2a2a);
+  background: #0a0a0a;
+}
+.attach-remove {
+  position: absolute; top: -0.3rem; right: -0.3rem;
+  width: 1.15rem; height: 1.15rem; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.6rem; line-height: 1;
+  background: var(--foreground, #e7e7e7); color: var(--background, #0a0a0a);
+  border: none; cursor: pointer;
+}
+.attach-remove:hover { background: var(--error, #ef4444); color: #fff; }
+.attach-name {
+  display: block; margin-top: 0.2rem; font-size: 0.6rem;
+  color: var(--foreground-muted, #8b8b8b);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Attachments inside a sent message */
+.msg-attachments {
+  display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem;
+}
+.msg-attachment {
+  position: relative; width: 5.5rem; height: 5.5rem; padding: 0;
+  border-radius: 0.5rem; overflow: hidden; cursor: pointer;
+  border: 1px solid var(--border, #2a2a2a);
+  /* Dark surround — a bright frame compresses perceived contrast in the
+     greyscale range where radiographic findings sit. */
+  background: #0a0a0a;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.msg-attachment:hover {
+  border-color: var(--accent, #3b82f6); transform: translateY(-1px);
+}
+.msg-attachment img { width: 100%; height: 100%; object-fit: cover; }
+.msg-attachment-fallback {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%; font-size: 1.3rem; opacity: 0.5;
+}
+/* Marks an attachment whose text was extracted and fed into the question. */
+.msg-attachment-ocr {
+  position: absolute; bottom: 0.2rem; right: 0.2rem;
+  width: 1rem; height: 1rem; border-radius: 0.25rem;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.55rem; font-weight: 700;
+  background: var(--accent, #3b82f6); color: #fff;
+}
+
+/* ── Figures from a cited article (Phase 4, Step 3) ──────────────
+   Shown inside the source card: a citation you can look at.
+   Deliberately smaller than chat attachments — these are supporting
+   evidence for a passage, not the subject of the conversation. */
+.source-figures {
+  display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem;
+}
+.source-figure {
+  width: 4.5rem; height: 4.5rem; padding: 0;
+  border-radius: 0.4rem; overflow: hidden; cursor: zoom-in;
+  border: 1px solid var(--border, #2a2a2a);
+  /* Same dark surround as .msg-attachment: a bright frame compresses
+     perceived contrast in the greyscale range where findings sit. */
+  background: #0a0a0a;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.source-figure:hover {
+  border-color: var(--accent, #3b82f6); transform: translateY(-1px);
+}
+.source-figure img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+@media (prefers-reduced-motion: reduce) {
+  .source-figure { transition: none; }
+  .source-figure:hover { transform: none; }
+}

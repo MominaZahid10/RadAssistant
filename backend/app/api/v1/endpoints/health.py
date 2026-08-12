@@ -28,6 +28,8 @@ from app.services.embedding import embedding_service
 from app.services.qdrant_service import qdrant_service
 from app.services.llm_service import llm_service
 from app.services.reranker import reranker_service
+from app.services.vision_service import vision_service
+from app.services import dicom_service
 from app.services.lexical_service import lexical_index
 
 router = APIRouter()
@@ -124,6 +126,33 @@ async def health_check(verify_llm: bool = False):
         )
     else:
         health["components"]["reranker"] = f"enabled, not yet loaded: {rr['model']}"
+
+    # ── Check the vision reader (Phase 4.5) ──────────────────
+    # Same reasoning as the reranker: falling back to Tesseract is a real
+    # quality regression on low-resolution photos — it is what inverted a
+    # clinical finding — so "silently degraded" must be visible here.
+    vision_reason = vision_service.unavailable_reason()
+    health["components"]["vision"] = (
+        f"available: {vision_service.model}"
+        if vision_reason is None
+        else f"unavailable — falling back to OCR ({vision_reason})"
+    )
+
+    # ── Check DICOM support (Phase 4) ────────────────────────
+    # pydicom is imported lazily and the service degrades when it is absent,
+    # so a DICOM upload failing is otherwise indistinguishable from a bad
+    # file. Report the library's presence explicitly.
+    # ⚠️  ASK is_available(), NOT unavailable_reason().
+    # The two services differ: vision_service.unavailable_reason() returns
+    # None when healthy, dicom_service.unavailable_reason() always returns
+    # the same explanatory string. Testing the latter for None reported DICOM
+    # as broken on a container where pydicom was installed and working.
+    if dicom_service.is_available():
+        health["components"]["dicom"] = "available"
+    else:
+        health["components"]["dicom"] = (
+            f"unavailable — {dicom_service.unavailable_reason()}"
+        )
 
     # ── Check the lexical index (Phase 3.6) ──────────────────
     lx = lexical_index.get_info()

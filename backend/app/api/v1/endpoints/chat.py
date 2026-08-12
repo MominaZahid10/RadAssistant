@@ -94,8 +94,14 @@ async def _complete_response(request: ChatRequest) -> ChatResponse:
     try:
         result = await rag_service.answer(
             query=request.query,
-            mode="qa",
+            # ⚠️  WAS HARDCODED "qa". REPORT_SYSTEM_PROMPT existed and
+            # rag_service supported mode="report" from Phase 3 onward, but
+            # these two lines meant nothing could ever reach it — report
+            # generation, the project's headline feature, was dead code.
+            mode=request.mode.value,
             audience=request.audience.value,
+            attached_text=request.attached_text,
+            attached_warnings=request.attached_warnings,
         )
     except RuntimeError as e:
         # No LLM provider configured, or all providers failed
@@ -165,8 +171,14 @@ async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
         # Get the stream + sources from the RAG service.
         sources, token_stream = await rag_service.answer_stream(
             query=request.query,
-            mode="qa",
+            # ⚠️  WAS HARDCODED "qa". REPORT_SYSTEM_PROMPT existed and
+            # rag_service supported mode="report" from Phase 3 onward, but
+            # these two lines meant nothing could ever reach it — report
+            # generation, the project's headline feature, was dead code.
+            mode=request.mode.value,
             audience=request.audience.value,
+            attached_text=request.attached_text,
+            attached_warnings=request.attached_warnings,
         )
 
         # ── Event 1: Sources ──

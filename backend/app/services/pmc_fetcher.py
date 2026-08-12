@@ -96,17 +96,164 @@ def _strip_noise(elem: ET.Element) -> None:
 
     Also dropped: tables (unreadable as linear text), figure captions without
     their images, and formula markup.
+
+    ⚠️  TAIL TEXT MUST BE RESCUED BEFORE REMOVAL — THIS WAS A SILENT BUG.
+    In ElementTree, the text FOLLOWING an element is stored on that element as
+    `.tail`, not on the parent. So `parent.remove(child)` deletes the child
+    AND everything written after it up to the next sibling.
+
+    For <xref> that is catastrophic, because a citation marker sits in the
+    middle of a sentence and the rest of the paragraph is its tail:
+
+        <p>Wedge deformity was common <xref>12</xref>, and posterior wall
+           involvement was rare. Height loss was graded on ...</p>
+
+        removed naively  →  "Wedge deformity was common"
+        everything from ", and posterior wall" onward: gone, no error
+
+    JATS body text is dense with citation markers, so this truncated nearly
+    every paragraph at its first reference. Caught by a Phase 4 fixture whose
+    article parsed to 59 characters of body text.
     """
-    for tag in (
+    NOISE_TAGS = {
         "xref", "table-wrap", "table", "graphic", "inline-graphic",
         "disp-formula", "inline-formula", "media", "supplementary-material",
         "fig", "ref-list", "back",
-    ):
-        for parent in elem.iter():
-            for child in list(parent):
-                # Tags may carry a namespace prefix.
-                if child.tag.split("}")[-1] == tag:
-                    parent.remove(child)
+    }
+
+    # Collect first, mutate after. Removing during elem.iter() perturbs the
+    # traversal and can skip siblings.
+    doomed: list[tuple[ET.Element, ET.Element]] = [
+        (parent, child)
+        for parent in elem.iter()
+        for child in list(parent)
+        # Tags may carry a namespace prefix.
+        if child.tag.split("}")[-1] in NOISE_TAGS
+    ]
+
+    for parent, child in doomed:
+        _remove_preserving_tail(parent, child)
+
+
+def _remove_preserving_tail(parent: ET.Element, child: ET.Element) -> None:
+    """
+    Drop `child` but keep the text that followed it.
+
+    The tail is re-homed onto whatever now precedes that position: the
+    previous sibling's tail, or the parent's own text if the removed element
+    was first. A space is inserted so words either side don't fuse — "common"
+    + ", and" is fine, but "the" + "patient" would otherwise become
+    "thepatient".
+    """
+    tail = child.tail or ""
+    try:
+        index = list(parent).index(child)
+    except ValueError:                       # already gone
+        return
+
+    if tail:
+        if index > 0:
+            previous = parent[index - 1]
+            previous.tail = (previous.tail or "") + " " + tail
+        else:
+            parent.text = (parent.text or "") + " " + tail
+
+    parent.remove(child)
+
+
+def _licence_of(root: ET.Element) -> str:
+    """
+    The article's licence, as a short human-readable string.
+
+    Recorded per figure. We only ingest from the Open Access Subset, so
+    redistribution is permitted — but "we checked at ingest time" is not
+    something a reviewer can verify six months later, and licences differ
+    (CC-BY permits reuse with attribution; CC-BY-NC-ND does not permit
+    derivatives). Storing the actual terms alongside the image is the
+    difference between a provenance claim and a provenance record.
+    """
+    for node in root.iter():
+        if node.tag.split("}")[-1] != "license":
+            continue
+        href = next(
+            (v for k, v in node.attrib.items() if "href" in k.lower()), ""
+        )
+        if "creativecommons.org" in href:
+            # https://creativecommons.org/licenses/by-nc/4.0/ → CC-BY-NC 4.0
+            parts = [p for p in href.rstrip("/").split("/") if p]
+            try:
+                i = parts.index("licenses")
+                return f"CC-{parts[i + 1].upper()} {parts[i + 2]}".strip()
+            except (ValueError, IndexError):
+                return href
+        lic_type = (node.get("license-type") or "").strip()
+        if lic_type:
+            return lic_type
+        text = _text_of(node)
+        if text:
+            return text[:200]
+    return ""
+
+
+def extract_figures(root: ET.Element) -> list[dict]:
+    """
+    Pull every <fig> out of a JATS article, with its caption and image href.
+
+    ⚠️  THIS REVERSES A PHASE 3 DECISION, AND THE ORDER IS THE WHOLE POINT.
+    `_strip_noise()` deletes <fig> because a caption with no image is noise in
+    a text chunk — "Fig. 3. Axial CT at the level of the carina." retrieves
+    for "axial CT" and then tells the reader nothing. That reasoning still
+    holds, so captions STILL do not go into the article body.
+
+    What changed is that we now want the image too. So figures are extracted
+    BEFORE stripping, and the caption travels with the image record rather
+    than with the text. Same caption, different home — and now it is the text
+    half of an image-text pair instead of an orphan sentence.
+
+    If this is ever called after _strip_noise(), it silently returns [] and
+    the corpus quietly loses every figure. Hence test_extract_figures_must_
+    run_before_strip_noise.
+    """
+    figures: list[dict] = []
+
+    for node in root.iter():
+        if node.tag.split("}")[-1] != "fig":
+            continue
+
+        # <graphic xlink:href="..."> names the image file. The namespace
+        # prefix varies between PMC exports, so match on the local name.
+        href = ""
+        for child in node.iter():
+            if child.tag.split("}")[-1] not in ("graphic", "inline-graphic"):
+                continue
+            href = next(
+                (v for k, v in child.attrib.items() if k.split("}")[-1] == "href"),
+                "",
+            )
+            if href:
+                break
+
+        if not href:
+            # A figure we cannot fetch is not worth a row.
+            continue
+
+        label = ""
+        caption = ""
+        for child in node:
+            tag = child.tag.split("}")[-1]
+            if tag == "label":
+                label = _text_of(child)
+            elif tag == "caption":
+                caption = _text_of(child)
+
+        figures.append({
+            "label": label,
+            "caption": caption,
+            "href": href,
+            "fig_id": node.get("id") or "",
+        })
+
+    return figures
 
 
 def _text_of(elem: ET.Element | None) -> str:
@@ -171,6 +318,13 @@ def parse_pmc_article(root: ET.Element) -> dict | None:
     abstract_el = root.find(".//article-meta//abstract")
     body_el = root.find(".//body")
 
+    # ⚠️  FIGURES FIRST — _strip_noise() DELETES <fig>.
+    # Captions still stay out of the text (an image-less caption is noise in a
+    # chunk); they travel with the image record instead. Reversing these two
+    # lines would leave every article with zero figures and no error.
+    figures = extract_figures(root) if body_el is not None else []
+    licence = _licence_of(root)
+
     # Strip noise before flattening — order matters.
     for el in (abstract_el, body_el):
         if el is not None:
@@ -209,6 +363,8 @@ def parse_pmc_article(root: ET.Element) -> dict | None:
         "journal": journal,
         "year": year,
         "url": url,
+        "licence": licence,
+        "figures": figures,
     }
 
 

@@ -77,9 +77,14 @@ services:
       dockerfile: Dockerfile
     container_name: radassist-backend
     restart: unless-stopped
-    # --reload lives HERE, not in the Dockerfile, so the image itself stays
-    # production-deployable. This override is dev-only.
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # ⚠️  WAIT FOR POSTGRES, THEN MIGRATE, THEN SERVE — see backend/start.sh.
+    # This was `alembic upgrade head && uvicorn ...` inline. On a MACHINE
+    # REBOOT that fails: `depends_on: condition: service_healthy` below only
+    # orders `docker compose up`, not the daemon's own restart of
+    # `restart: unless-stopped` containers. Postgres and the backend race,
+    # alembic hits "the database system is starting up", the && chain breaks,
+    # and the container exits — taking the 8000 port mapping with it.
+    command: sh /app/start.sh
     ports:
       - "8000:8000"
     env_file:
@@ -92,6 +97,7 @@ services:
       - QDRANT_PORT=6333
       - DEBUG=true
       - UPLOAD_DIR=/app/uploads
+      - IMAGE_DIR=/app/images
       # Python block-buffers stdout when it isn't a TTY, so print() output sits
       # in a buffer while uvicorn's logger (which writes immediately) appears
       # first. The result is a log where startup messages show up late or out
@@ -128,9 +134,17 @@ services:
       - RERANK_CANDIDATES=${RERANK_CANDIDATES:-48}
       - RETRIEVAL_LIMIT=${RETRIEVAL_LIMIT:-12}
       - MAX_CHUNKS_PER_DOCUMENT=${MAX_CHUNKS_PER_DOCUMENT:-3}
+      # Phase 4.5 — read report photos with a vision model instead of
+      # Tesseract. Set false to A/B the two readers on the same upload path:
+      #   VISION_ENABLED=false docker-compose up -d backend   → OCR only
+      - VISION_ENABLED=${VISION_ENABLED:-true}
+      # ⚠️  The only vision model Groq still serves; every alternative was
+      # retired between Oct 2024 and Jul 2026. See app/config.py.
+      - VISION_MODEL=${VISION_MODEL:-qwen/qwen3.6-27b}
     volumes:
       - ./backend:/app             # Mount code for hot reload
       - uploads_data:/app/uploads  # Named volume so uploads don't land in your source tree
+      - images_data:/app/images    # Phase 4: image files (metadata stays in Postgres)
       # ⚠️  BIND MOUNT, NOT A NAMED VOLUME — ON PURPOSE.
       # This was a named volume, which `docker-compose down -v` destroys.
       # Combined with HF_HUB_OFFLINE=1 that produced an unrecoverable state:
@@ -186,3 +200,4 @@ volumes:
   postgres_data:
   qdrant_data:
   uploads_data:
+  images_data:

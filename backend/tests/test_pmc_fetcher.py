@@ -234,3 +234,95 @@ def test_topics_extend_beyond_chest_imaging():
 
 def test_topics_are_unique():
     assert len(set(DEFAULT_TOPICS)) == len(DEFAULT_TOPICS)
+
+
+# ══════════════════════════════════════════════════════════════
+# TAIL PRESERVATION — the silent truncation bug
+# ══════════════════════════════════════════════════════════════
+#
+# ⚠️  FOUND IN PHASE 4, PRESENT SINCE PHASE 3, AFFECTED THE WHOLE CORPUS.
+#
+# ElementTree stores the text FOLLOWING an element on that element as `.tail`.
+# So `parent.remove(child)` deletes the child AND everything written after it.
+# For <xref> — a citation marker in the middle of a sentence — the tail is the
+# entire rest of the paragraph.
+#
+# Every ingested article was therefore truncated at the first reference marker
+# in each paragraph. No exception, no warning; the documents were simply
+# shorter than they should have been. A Phase 4 fixture parsed to 59 characters
+# of body text where it should have produced 909.
+
+import xml.etree.ElementTree as ET
+
+from app.services.pmc_fetcher import _strip_noise, _text_of
+
+
+def _stripped(xml: str) -> str:
+    root = ET.fromstring(xml)
+    _strip_noise(root)
+    return _text_of(root)
+
+
+def test_text_after_a_citation_marker_survives():
+    """The exact shape that was being truncated."""
+    text = _stripped(
+        "<body><p>Wedge deformity was common <xref ref-type='bibr'>12</xref>, "
+        "and posterior wall involvement was rare.</p></body>"
+    )
+    assert "posterior wall involvement was rare" in text
+    assert "12" not in text
+
+
+def test_multiple_markers_in_one_paragraph():
+    text = _stripped(
+        "<body><p>First <xref>1</xref> second <xref>2</xref> third "
+        "<xref>3</xref> fourth.</p></body>"
+    )
+    for word in ("First", "second", "third", "fourth"):
+        assert word in text
+    assert not any(d in text for d in ("1", "2", "3"))
+
+
+def test_marker_at_the_start_of_a_paragraph_keeps_the_rest():
+    """No previous sibling — the tail must re-home onto the parent's text."""
+    text = _stripped(
+        "<body><p><xref>7</xref> Subsequent imaging confirmed the finding.</p></body>"
+    )
+    assert "Subsequent imaging confirmed the finding" in text
+    assert "7" not in text
+
+
+def test_words_do_not_fuse_across_a_removed_element():
+    """"the" + "patient" must not become "thepatient" and break tokenisation."""
+    text = _stripped("<body><p>the<xref>9</xref>patient</p></body>")
+    assert "thepatient" not in text
+    assert "the" in text and "patient" in text
+
+
+def test_prose_after_a_figure_survives():
+    """<fig> removal has the same hazard as <xref>."""
+    text = _stripped(
+        "<body><sec><p>Before the figure.</p>"
+        "<fig><label>Fig. 1</label><caption><p>A caption.</p></caption></fig>"
+        "<p>After the figure.</p></sec></body>"
+    )
+    assert "Before the figure" in text
+    assert "After the figure" in text
+    assert "A caption" not in text, "captions still belong to the image, not the text"
+
+
+def test_stripping_removes_far_less_than_it_used_to():
+    """
+    Regression canary. The naive implementation deleted 94% of this paragraph;
+    the correct one removes only the marker itself.
+    """
+    xml = (
+        "<body><p>" + "Sentence one is reasonably long. " * 10 +
+        "<xref>4</xref>" + " Sentence two is also reasonably long. " * 10 +
+        "</p></body>"
+    )
+    root = ET.fromstring(xml)
+    before = len(_text_of(root))
+    _strip_noise(root)
+    after = len(_text_of(root))
+    assert after > before * 0.9, f"lost {before - after} of {before} characters"

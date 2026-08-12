@@ -61,7 +61,9 @@ from app.schemas.document import (
     SearchResult,
     KnowledgeBaseStats,
 )
-from app.schemas.rag import PMCFetchRequest
+from app.models.image import MedicalImage
+from app.schemas.image import ImageResponse
+from app.schemas.rag import FigureFetchRequest, PMCFetchRequest
 from app.data.seed_knowledge import SEED_KNOWLEDGE
 from app.services.ingestion import ingest_document
 from app.services.embedding import embedding_service
@@ -665,6 +667,116 @@ async def fetch_pmc(
         "max_per_topic": max_per_topic,
         "next_step": "Poll GET /api/v1/knowledge/stats to watch documents appear.",
     }
+
+
+@router.post(
+    "/fetch-figures",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Download figures from ingested PMC articles",
+    description=(
+        "Extracts figures and captions from the open-access articles already "
+        "in the corpus, and stores them as images linked to their parent "
+        "document.\n\n"
+        "Every figure carries an author-written caption, so this produces "
+        "genuinely paired image-text data — no scraping, no labelling, and "
+        "no licensing grey area, since the corpus is Open Access Subset "
+        "only. The licence is recorded per image.\n\n"
+        "**Safe to re-run.** Figures already stored are skipped by URL, and "
+        "each figure is isolated: a timeout or 404 costs that one image and "
+        "the run continues. Several partial runs converge on a full corpus, "
+        "which matters on an unreliable connection.\n\n"
+        "Watch progress in the backend logs, then check "
+        "`GET /api/v1/knowledge/figure-stats`."
+    ),
+)
+async def fetch_figures(
+    request: FigureFetchRequest | None = None,
+    background_tasks: BackgroundTasks = None,  # type: ignore[assignment]
+):
+    """
+    Kick off figure extraction in the background.
+
+    202 + poll, like every other long job here: downloading hundreds of images
+    takes minutes, and holding an HTTP request open for that is how you get a
+    gateway timeout that tells the caller nothing about what completed.
+    """
+    request = request or FigureFetchRequest()
+    limit_documents = request.limit_documents
+    max_per_doc = request.max_figures_per_document
+
+    async def _run() -> None:
+        # Owns its own session: the request-scoped one is closed by the time
+        # a background task runs. Same pattern as _process_upload.
+        from app.core.database import async_session
+        from app.services.figure_fetcher import fetch_figures_for_corpus
+
+        async with async_session() as session:
+            try:
+                summary = await fetch_figures_for_corpus(
+                    session,
+                    limit_documents=limit_documents,
+                    max_figures_per_document=max_per_doc,
+                )
+                print(f"🖼️  Figure fetch complete: {summary}")
+            except Exception as e:  # noqa: BLE001
+                print(f"❌ Figure fetch failed: {e}")
+
+    background_tasks.add_task(_run)
+
+    return {
+        "message": "Figure extraction started in the background.",
+        "limit_documents": limit_documents,
+        "max_figures_per_document": max_per_doc,
+        "next_step": "Poll GET /api/v1/knowledge/figure-stats to watch coverage grow.",
+    }
+
+
+@router.get(
+    "/figure-stats",
+    summary="Figure coverage across the corpus",
+    description=(
+        "How many PMC articles have figures stored, and how many of those "
+        "figures carry captions. Coverage below 1.0 is normal — not every "
+        "article has figures, and a flaky run leaves gaps that re-running "
+        "fills in."
+    ),
+)
+async def get_figure_stats(db: AsyncSession = Depends(get_db)):
+    from app.services.figure_fetcher import figure_stats
+    return await figure_stats(db)
+
+
+@router.get(
+    "/documents/{document_id}/images",
+    response_model=list[ImageResponse],
+    summary="Figures belonging to one article",
+    description=(
+        "The images extracted from a single document. Used by the chat "
+        "evidence panel to show figures beside the passage that cited them."
+    ),
+)
+async def get_document_images(
+    document_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    rows = (await db.execute(
+        select(MedicalImage)
+        .where(MedicalImage.document_id == document_id)
+        .where(MedicalImage.status == "completed")
+        .order_by(MedicalImage.created_at)
+    )).scalars().all()
+
+    out: list[ImageResponse] = []
+    for img in rows:
+        # Storage paths never leave the server — clients get routes and let
+        # the server resolve them. See app/schemas/image.py.
+        resp = ImageResponse.model_validate(img)
+        resp.file_url = f"/api/v1/images/{img.id}/file"
+        resp.thumbnail_url = (
+            f"/api/v1/images/{img.id}/thumbnail" if img.thumbnail_path else None
+        )
+        out.append(resp)
+    return out
 
 
 @router.post(

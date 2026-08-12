@@ -10,12 +10,24 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { api, type SSEEvent, type SourceReference, type Audience } from "@/lib/api";
+import {
+  api,
+  imageApi,
+  imageUrl,
+  type SSEEvent,
+  type SourceReference,
+  type Audience,
+  type ChatMode,
+  type MedicalImage,
+} from "@/lib/api";
+import ImageViewer from "@/components/ImageViewer";
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Images the user attached to this message. */
+  images?: MedicalImage[];
   sources?: SourceReference[];
   model?: string;
   isStreaming?: boolean;
@@ -304,12 +316,102 @@ function MarkdownAnswer({
   return <div className="markdown-body">{blocks}</div>;
 }
 
+/**
+ * A file staged in the composer but not yet sent.
+ *
+ * Uploading happens on SEND rather than on selection, so a user who attaches
+ * something and then changes their mind hasn't written anything to the server.
+ */
+interface PendingAttachment {
+  key: string;
+  file: File;
+  /** Local object URL for the preview — no round trip needed. */
+  previewUrl: string;
+}
+
+
+/**
+ * Figures belonging to a cited article, shown inside its source card.
+ *
+ * THE FIRST GENUINELY MULTIMODAL MOMENT IN THE PRODUCT: a citation you can
+ * look at, not just read. The figure and its caption were written together by
+ * the article's authors, so the caption is real alt text rather than a guess.
+ *
+ * WHY IT FETCHES ITSELF RATHER THAN ARRIVING WITH THE ANSWER:
+ * Most answers cite papers with no figures, and the SSE `sources` event is on
+ * the critical path — the evidence panel renders from it while tokens are
+ * still streaming. Loading figures here means the answer is never delayed by
+ * an image lookup, and articles the user never expands are never queried.
+ *
+ * Renders nothing at all on failure or when there are no figures. A missing
+ * illustration must never disturb an answer that is already on screen.
+ */
+const figureCache = new Map<string, MedicalImage[]>();
+
+function SourceFigures({
+  documentId,
+  onView,
+}: {
+  documentId: string | null;
+  onView: (img: MedicalImage) => void;
+}) {
+  const [figures, setFigures] = useState<MedicalImage[]>(
+    () => (documentId ? figureCache.get(documentId) ?? [] : [])
+  );
+
+  useEffect(() => {
+    if (!documentId || figureCache.has(documentId)) return;
+
+    let cancelled = false;
+    imageApi.forDocument(documentId).then((imgs) => {
+      const withThumbs = imgs.filter((i) => i.thumbnail_url);
+      figureCache.set(documentId, withThumbs);
+      // Guard against setting state after the panel is collapsed again —
+      // React warns, and on a slow connection this fires constantly.
+      if (!cancelled) setFigures(withThumbs);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [documentId]);
+
+  if (figures.length === 0) return null;
+
+  return (
+    <div className="source-figures">
+      {figures.map((fig) => (
+        <button
+          key={fig.id}
+          type="button"
+          className="source-figure"
+          onClick={() => onView(fig)}
+          // The caption IS the alt text — authored, not inferred.
+          title={fig.caption ?? "Figure"}
+        >
+          <img
+            src={imageUrl(fig.thumbnail_url)!}
+            alt={fig.caption ?? "Figure from the cited article"}
+            loading="lazy"
+          />
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [audience, setAudience] = useState<Audience>("radiologist");
+  // Ask a question, or dictate findings and get a structured draft.
+  const [mode, setMode] = useState<ChatMode>("qa");
   const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
+  // Files staged in the composer, not yet uploaded.
+  const [pending, setPending] = useState<PendingAttachment[]>([]);
+  const [viewing, setViewing] = useState<MedicalImage | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -340,18 +442,53 @@ export default function ChatPage() {
     });
   }, []);
 
+  // ── Attachments ────────────────────────────────────────────
+
+  const addFiles = (files: FileList | null) => {
+    if (!files?.length) return;
+    setPending((prev) => [
+      ...prev,
+      ...Array.from(files).map((file) => ({
+        key: `${file.name}-${file.size}-${Date.now()}-${Math.random()}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+      })),
+    ]);
+  };
+
+  const removePending = (key: string) => {
+    setPending((prev) => {
+      const target = prev.find((p) => p.key === key);
+      // Object URLs leak until revoked — the browser holds the whole file
+      // in memory otherwise.
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((p) => p.key !== key);
+    });
+  };
+
+  // Paste an image straight from the clipboard, like ChatGPT/Claude.
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const files = Array.from(e.clipboardData.files);
+    if (files.length) {
+      e.preventDefault();
+      addFiles(e.clipboardData.files);
+    }
+  };
+
   const handleSend = async () => {
     const trimmed = input.trim();
-    if (!trimmed || isLoading) return;
+    const attachments = pending;
 
-    // Add user message
+    // Either text or an attachment is enough to send.
+    if ((!trimmed && attachments.length === 0) || isLoading) return;
+
+    const userMsgId = Date.now().toString();
     const userMsg: Message = {
-      id: Date.now().toString(),
+      id: userMsgId,
       role: "user",
       content: trimmed,
     };
 
-    // Create placeholder for AI response
     const aiMsgId = (Date.now() + 1).toString();
     const aiMsg: Message = {
       id: aiMsgId,
@@ -362,13 +499,85 @@ export default function ChatPage() {
 
     setMessages((prev) => [...prev, userMsg, aiMsg]);
     setInput("");
+    setPending([]);
     setIsLoading(true);
+
+    // ── Upload attachments before asking the question ──
+    // Uploading on SEND rather than on selection means a user who attaches
+    // something and then changes their mind hasn't written to the server.
+    let query = trimmed;
+    let attachedText = "";
+    let attachedWarnings: string[] = [];
+
+    if (attachments.length) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === aiMsgId
+            ? { ...m, content: `Reading ${attachments.length} attachment(s)…` }
+            : m
+        )
+      );
+
+      const uploaded: MedicalImage[] = [];
+      for (const att of attachments) {
+        try {
+          // Treat every attachment as a report photo so its text is
+          // extracted. The backend still detects DICOM from magic bytes and
+          // overrides this — a clinician shouldn't have to classify the file.
+          const accepted = await imageApi.upload(att.file, {
+            sourceType: "report_upload",
+          });
+          uploaded.push(await imageApi.waitForProcessing(accepted.id));
+        } catch (e) {
+          console.error("Attachment failed:", e);
+        } finally {
+          URL.revokeObjectURL(att.previewUrl);
+        }
+      }
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === userMsgId ? { ...m, images: uploaded } : m
+        )
+      );
+
+      // ⚠️  SENT SEPARATELY, NOT CONCATENATED INTO THE QUESTION.
+      // Appending the report to the query made the model treat retrieved
+      // papers as authoritative and the patient's own report as loose
+      // material — it inverted 'hyperlordotic' to 'hypolordotic' and
+      // changed a stated 50% to '25-50%'. As a separate field the backend
+      // places it above the literature and names it the primary source.
+      attachedText = uploaded
+        .filter((u) => u.ocr_text)
+        .map((u) => `--- ${u.filename} ---\n${u.ocr_text}`)
+        .join("\n\n");
+
+      // OCR caveats travel with the text so the model flags unreliable
+      // passages instead of stating misread words as fact.
+      attachedWarnings = uploaded
+        .filter((u) => u.description)
+        .map((u) => u.description as string);
+
+      if (!trimmed) {
+        query = attachedText
+          ? "Please review the attached report."
+          : "I've attached an image. What can you tell me about it?";
+      }
+
+      // Clear the placeholder before streaming begins.
+      setMessages((prev) =>
+        prev.map((m) => (m.id === aiMsgId ? { ...m, content: "" } : m))
+      );
+    }
 
     try {
       // Stream the response from the RAG pipeline
-      for await (const event of api.streamChat(trimmed, {
+      for await (const event of api.streamChat(query, {
         audience,
+        mode,
         includeSources: true,
+        attachedText: attachedText || undefined,
+        attachedWarnings: attachedWarnings.length ? attachedWarnings : undefined,
       })) {
         switch (event.type) {
           case "sources":
@@ -549,6 +758,42 @@ export default function ChatPage() {
                     )}
                   </div>
 
+                  {/* Attached images — click to open the full viewer */}
+                  {msg.images && msg.images.length > 0 && (
+                    <div className="msg-attachments">
+                      {msg.images.map((img) => (
+                        <button
+                          key={img.id}
+                          className="msg-attachment"
+                          onClick={() => setViewing(img)}
+                          title={
+                            img.ocr_text
+                              ? `${img.filename} — ${img.ocr_text.length} chars of text extracted`
+                              : img.filename
+                          }
+                        >
+                          {img.thumbnail_url ? (
+                            /* eslint-disable-next-line @next/next/no-img-element */
+                            <img
+                              src={imageUrl(img.thumbnail_url)!}
+                              alt={img.filename}
+                            />
+                          ) : (
+                            <span className="msg-attachment-fallback">🩻</span>
+                          )}
+                          {img.ocr_text && (
+                            <span
+                              className="msg-attachment-ocr"
+                              title="Text was extracted and included in the question"
+                            >
+                              T
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
                   {/* Source Citations */}
                   {msg.sources && msg.sources.length > 0 && !msg.isStreaming && (
                     <div className="mt-3">
@@ -604,6 +849,10 @@ export default function ChatPage() {
                               )}
                               <p className="source-text">{src.text}</p>
 
+                              <SourceFigures
+                                documentId={src.document_id ?? null}
+                                onView={setViewing}
+                              />
                             </div>
                           ))}
                         </div>
@@ -643,19 +892,106 @@ export default function ChatPage() {
       {/* Input Area — pinned to bottom */}
       <div className="border-t border-border bg-background-secondary p-4">
         <div className="max-w-3xl mx-auto">
+          {/* Staged attachments — shown above the input, like ChatGPT */}
+          {pending.length > 0 && (
+            <div className="attach-tray">
+              {pending.map((att) => (
+                <div key={att.key} className="attach-chip">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={att.previewUrl} alt={att.file.name} />
+                  <button
+                    onClick={() => removePending(att.key)}
+                    className="attach-remove"
+                    aria-label={`Remove ${att.file.name}`}
+                  >
+                    ✕
+                  </button>
+                  <span className="attach-name">{att.file.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex items-end gap-2 bg-surface rounded-xl border border-border focus-within:border-accent/50 transition-colors px-4 py-3">
+            {/* Attach — DICOM, report photos, any image */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              hidden
+              multiple
+              // PACS exports are often extension-less, hence octet-stream.
+              accept=".dcm,.dicom,image/*,application/octet-stream"
+              onChange={(e) => {
+                addFiles(e.target.files);
+                e.target.value = "";   // allow re-selecting the same file
+              }}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isLoading}
+              className="attach-button"
+              title="Attach an image, report photo, or DICOM file"
+              aria-label="Attach a file"
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" strokeWidth="2"
+                   strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              </svg>
+            </button>
+
             <textarea
               ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Describe your findings or ask a question..."
+              onPaste={handlePaste}
+              placeholder={
+                pending.length
+                  ? "Ask about the attached file, or just send…"
+                  : mode === "report"
+                  ? "Dictate findings — e.g. Mild cardiomegaly. No pleural effusion. Clear lung fields."
+                  : "Ask a radiology question..."
+              }
               rows={1}
               className="flex-1 bg-transparent text-sm text-foreground placeholder:text-foreground-muted resize-none outline-none max-h-[200px]"
             />
 
-            {/* Audience Toggle */}
+            {/* Mode Toggle - what to produce, not who for */}
             <div className="audience-toggle flex-shrink-0">
+              <button
+                onClick={() => setMode("qa")}
+                className={`audience-option ${mode === "qa" ? "active" : ""}`}
+                title="Answer a question from the knowledge base"
+              >
+                Ask
+              </button>
+              <button
+                onClick={() => setMode("report")}
+                className={`audience-option ${
+                  mode === "report" ? "active" : ""
+                }`}
+                title="Draft a structured report from dictated findings"
+              >
+                Draft
+              </button>
+            </div>
+
+            {/* Audience Toggle - only meaningful when answering a question.
+                A report goes into a medical record; its register is fixed by
+                reporting convention, not by who is reading it. */}
+            <div
+              className="audience-toggle flex-shrink-0"
+              style={{
+                opacity: mode === "report" ? 0.35 : 1,
+                pointerEvents: mode === "report" ? "none" : "auto",
+              }}
+              title={
+                mode === "report"
+                  ? "Not applicable when drafting a report"
+                  : undefined
+              }
+            >
               <button
                 onClick={() => setAudience("radiologist")}
                 className={`audience-option ${
@@ -679,9 +1015,9 @@ export default function ChatPage() {
             {/* Send Button */}
             <button
               onClick={handleSend}
-              disabled={!input.trim() || isLoading}
+              disabled={(!input.trim() && pending.length === 0) || isLoading}
               className={`p-2 rounded-lg transition-colors flex-shrink-0 ${
-                input.trim() && !isLoading
+                (input.trim() || pending.length > 0) && !isLoading
                   ? "bg-accent text-white hover:bg-accent-hover"
                   : "text-foreground-muted cursor-not-allowed"
               }`}
@@ -706,6 +1042,11 @@ export default function ChatPage() {
           </p>
         </div>
       </div>
+
+      {/* Full-screen viewer for an attached image */}
+      {viewing && (
+        <ImageViewer image={viewing} onClose={() => setViewing(null)} />
+      )}
     </div>
   );
 }

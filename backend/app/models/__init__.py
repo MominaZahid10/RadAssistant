@@ -12,6 +12,12 @@
 # its table WON'T be created. This is the #1 gotcha.
 
 from app.models.document import Document  # noqa: F401
+from app.models.image import MedicalImage  # noqa: F401 — Phase 4
+
+# ⚠️  EVERY model must be imported here. Alembic's autogenerate
+# compares Base.metadata against the live database — a model that
+# isn't imported is invisible to it, and autogenerate will propose
+# DROPPING its table.
 
 # Future phases will add:
 # from app.models.user import User          # Phase 6 (Authentication)

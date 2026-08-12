@@ -421,6 +421,9 @@ export default function ChatPage() {
   // Files staged in the composer, not yet uploaded.
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [viewing, setViewing] = useState<MedicalImage | null>(null);
+  // Surfaced under the composer. Attachment used to fail with no feedback at
+  // all, which is indistinguishable from the click not registering.
+  const [attachError, setAttachError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -471,16 +474,51 @@ export default function ChatPage() {
 
   // ── Attachments ────────────────────────────────────────────
 
-  const addFiles = (files: FileList | null) => {
-    if (!files?.length) return;
-    setPending((prev) => [
-      ...prev,
-      ...Array.from(files).map((file) => ({
+  const addFiles = (files: FileList | File[] | null) => {
+    // ⚠️  THIS PATH USED TO FAIL SILENTLY, TWICE OVER.
+    // Nothing here throws visibly: if staging drops a file, the user sees an
+    // unchanged composer and no explanation. Both known causes are handled,
+    // and anything left surfaces as a message rather than nothing.
+    if (!files) {
+      setAttachError("No file was received from the picker.");
+      return;
+    }
+
+    // ⚠️  MATERIALISE THE LIST *BEFORE* setPending, NOT INSIDE THE UPDATER.
+    // `input.files` is a LIVE FileList bound to the element. The onChange
+    // handler resets `e.target.value = ""` so the same file can be chosen
+    // twice — and that reset EMPTIES the FileList. React runs a functional
+    // updater asynchronously, after the handler returns, so `Array.from()`
+    // inside the updater ran against a list that had already been cleared.
+    const list = Array.from(files as ArrayLike<File>);
+    if (!list.length) {
+      setAttachError("The picker returned no files.");
+      return;
+    }
+
+    try {
+      const staged = list.map((file) => ({
         key: `${file.name}-${file.size}-${Date.now()}-${Math.random()}`,
         file,
         previewUrl: URL.createObjectURL(file),
-      })),
-    ]);
+      }));
+      setPending((prev) => [...prev, ...staged]);
+      setAttachError(null);
+    } catch (e) {
+      setAttachError(
+        e instanceof Error ? `Could not attach: ${e.message}` : "Could not attach that file."
+      );
+    }
+  };
+
+  // Drag a file straight onto the composer — an independent path to the same
+  // staging code, so a broken file picker is not a dead end.
+  const [dragging, setDragging] = useState(false);
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
   };
 
   const removePending = (key: string) => {
@@ -539,6 +577,8 @@ export default function ChatPage() {
     let query = trimmed;
     let attachedText = "";
     let attachedWarnings: string[] = [];
+    // Populated in Compare mode from the attached prior study.
+    let priorText = "";
 
     if (attachments.length) {
       setMessages((prev) =>
@@ -595,6 +635,17 @@ export default function ChatPage() {
           : "I've attached an image. What can you tell me about it?";
       }
 
+      // ── Compare mode: the attachment is the PRIOR study ──
+      // This mirrors the actual workflow. The radiologist has the previous
+      // report on file and is dictating the current one; they are not
+      // uploading both. So the attachment becomes prior_text and the typed
+      // findings stay as the query, which is what the backend expects.
+      if (mode === "comparison" && attachedText) {
+        priorText = attachedText;
+        attachedText = "";
+        attachedWarnings = [];
+      }
+
       // Clear the placeholder before streaming begins.
       setMessages((prev) =>
         prev.map((m) => (m.id === aiMsgId ? { ...m, content: "" } : m))
@@ -609,6 +660,7 @@ export default function ChatPage() {
         includeSources: true,
         attachedText: attachedText || undefined,
         attachedWarnings: attachedWarnings.length ? attachedWarnings : undefined,
+        priorText: priorText || undefined,
       })) {
         switch (event.type) {
           case "sources":
@@ -968,18 +1020,55 @@ export default function ChatPage() {
             </div>
           )}
 
-          <div className="flex items-end gap-2 bg-surface rounded-xl border border-border focus-within:border-accent/50 transition-colors px-4 py-3">
+          {attachError && (
+            <p className="attach-error">
+              {attachError}{" "}
+              <button onClick={() => setAttachError(null)}>dismiss</button>
+            </p>
+          )}
+
+          <div
+            className={`flex items-end gap-2 bg-surface rounded-xl border focus-within:border-accent/50 transition-colors px-4 py-3 ${
+              dragging ? "border-accent" : "border-border"
+            }`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={handleDrop}
+          >
             {/* Attach — DICOM, report photos, any image */}
             <input
               ref={fileInputRef}
               type="file"
-              hidden
               multiple
-              // PACS exports are often extension-less, hence octet-stream.
-              accept=".dcm,.dicom,image/*,application/octet-stream"
+              // ⚠️  POSITIONED OFF-SCREEN, NOT `hidden`.
+              // `hidden` sets display:none, and a display:none input is the
+              // least reliable way to do this — browsers and extensions treat
+              // it inconsistently, and a change event that never fires looks
+              // exactly like a click that never registered. An off-screen but
+              // rendered input is the standard robust pattern.
+              style={{
+                position: "absolute",
+                width: 1,
+                height: 1,
+                opacity: 0,
+                pointerEvents: "none",
+              }}
+              tabIndex={-1}
+              // ⚠️  NO `accept` FILTER.
+              // It was `.dcm,.dicom,image/*,application/octet-stream`. On
+              // Windows the picker then silently refuses files whose MIME type
+              // the OS reports differently — you select the file, the dialog
+              // closes, and nothing arrives. The backend already sniffs the
+              // CONTENT rather than trusting the extension, so filtering here
+              // only ever rejects files the server would have handled.
               onChange={(e) => {
-                addFiles(e.target.files);
-                e.target.value = "";   // allow re-selecting the same file
+                const chosen = e.target.files ? Array.from(e.target.files) : [];
+                // Copy out BEFORE resetting — the reset empties the live list.
+                e.target.value = "";
+                addFiles(chosen);
               }}
             />
             <button
@@ -1007,6 +1096,8 @@ export default function ChatPage() {
                   ? "Ask about the attached file, or just send…"
                   : mode === "report"
                   ? "Dictate findings — e.g. Mild cardiomegaly. No pleural effusion. Clear lung fields."
+                  : mode === "comparison"
+                  ? "Attach the PRIOR study, then dictate the CURRENT findings here…"
                   : "Ask a radiology question..."
               }
               rows={1}
@@ -1030,6 +1121,15 @@ export default function ChatPage() {
                 title="Draft a structured report from dictated findings"
               >
                 Draft
+              </button>
+              <button
+                onClick={() => setMode("comparison")}
+                className={`audience-option ${
+                  mode === "comparison" ? "active" : ""
+                }`}
+                title="Attach the prior study, dictate the current findings"
+              >
+                Compare
               </button>
             </div>
 

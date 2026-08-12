@@ -26,6 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.report import Report, ReportStatus
 from app.schemas.report import (
+    QualityCheckRequest,
+    QualityCheckResponse,
+    QualityIssue,
     ReportCreate,
     ReportListResponse,
     ReportResponse,
@@ -33,6 +36,7 @@ from app.schemas.report import (
     ReportStatusEnum,
     ReportUpdate,
 )
+from app.services.quality_service import check_report
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
@@ -151,6 +155,44 @@ async def get_report_stats(db: AsyncSession = Depends(get_db)):
         # make the rate fall simply because someone generated more drafts.
         edit_rate=round(edited / reviewed, 3) if reviewed else 0.0,
         approval_rate=round(approved / reviewed, 3) if reviewed else 0.0,
+    )
+
+
+@router.post(
+    "/quality-check",
+    response_model=QualityCheckResponse,
+    summary="Check a report draft for defects",
+    description=(
+        "Runs deterministic checks for missing sections, template "
+        "placeholders, measurements without units, contradictory laterality, "
+        "stacked hedging, and figures appearing in the impression that are "
+        "absent from the findings.\n\n"
+        "**Rules, not a model.** The same draft always produces the same "
+        "flags, each points at a line, and a clean report produces silence. "
+        "The success metric is a reduction in these counts over time, which "
+        "requires a detector whose sensitivity does not drift.\n\n"
+        "Stateless — the text does not need to be saved first, so the editor "
+        "can check as the reviewer types."
+    ),
+)
+async def quality_check(payload: QualityCheckRequest):
+    # No DB, no LLM, no network. Fast enough to run on every keystroke pause,
+    # which is the only way a checker actually gets used.
+    result = check_report(payload.text)
+    return QualityCheckResponse(
+        issues=[
+            QualityIssue(
+                code=i.code,
+                severity=i.severity,
+                message=i.message,
+                line=i.line,
+                excerpt=i.excerpt,
+            )
+            for i in result.issues
+        ],
+        errors=result.errors,
+        warnings=result.warnings,
+        is_clean=result.is_clean,
     )
 
 

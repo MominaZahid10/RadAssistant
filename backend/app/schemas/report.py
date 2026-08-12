@@ -115,6 +115,35 @@ class ReportListResponse(BaseModel):
     page_size: int
 
 
+class QualityCheckRequest(BaseModel):
+    text: str = Field(
+        min_length=1, max_length=50_000,
+        description="Report text to check. Does not need to be saved first.",
+    )
+
+
+class QualityIssue(BaseModel):
+    code: str = Field(
+        description=(
+            "Stable identifier for the rule that fired. Stable on purpose: "
+            "the project's success metric is a reduction in these counts over "
+            "time, which only means something if the identifier does not "
+            "change between releases."
+        )
+    )
+    severity: str = Field(description="error | warning | info")
+    message: str
+    line: int | None = Field(default=None, description="1-based line number.")
+    excerpt: str = ""
+
+
+class QualityCheckResponse(BaseModel):
+    issues: list[QualityIssue]
+    errors: int
+    warnings: int
+    is_clean: bool
+
+
 class ReportStats(BaseModel):
     """
     Sign-off statistics.

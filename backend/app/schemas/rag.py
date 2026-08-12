@@ -18,8 +18,9 @@ class ChatMode(str, Enum):
     """
     What the model is being asked to DO, as opposed to who for (Audience).
 
-    qa     — answer a question from the knowledge base, conversational register
-    report — draft a structured radiology report from findings the user typed
+    qa         — answer a question from the knowledge base
+    report     — draft a structured report from findings the user typed
+    comparison — compare a prior study against the current findings
 
     ⚠️  WHY THIS IS AN ENUM AND NOT A FREE STRING.
     An unrecognised mode must fail at validation with a 422. The alternative —
@@ -37,6 +38,7 @@ class ChatMode(str, Enum):
     """
     QA = "qa"
     REPORT = "report"
+    COMPARISON = "comparison"
 
 
 class Audience(str, Enum):
@@ -80,9 +82,26 @@ class ChatRequest(BaseModel):
             "What to produce.\n\n"
             "`qa` (default) — answer the question from the knowledge base.\n\n"
             "`report` — treat the input as radiology FINDINGS and draft a "
-            "structured report (Findings / Impression) in clinical register, "
-            "with inline citations. Output goes into a medical record, so it "
-            "carries no conversational preamble or hedging prose."
+            "structured report (Findings / Impression) in clinical register. "
+            "Output goes into a medical record, so it carries no "
+            "conversational preamble or hedging prose.\n\n"
+            "`comparison` — compare `prior_text` against the current findings "
+            "and report what is new, no longer mentioned, unchanged, or "
+            "reported differently."
+        ),
+    )
+    prior_text: str | None = Field(
+        default=None,
+        max_length=50_000,
+        description=(
+            "A previous report to compare against. Measurements in both are "
+            "paired and differenced deterministically before the model sees "
+            "them, so the comparison narrates settled arithmetic rather than "
+            "computing it.\n\n"
+            "The output states both values and never characterises the "
+            "difference: 8mm previously and 9mm now is either interval growth "
+            "or inter-reader variation, and two reports cannot distinguish "
+            "them."
         ),
     )
     stream: bool = Field(

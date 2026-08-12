@@ -72,11 +72,12 @@ export type Audience = "radiologist" | "resident";
  *   qa     - answer a question from the knowledge base
  *   report - treat the input as dictated FINDINGS and draft a structured
  *            report (Findings / Impression) in clinical register
+ *   comparison - compare a prior study against the current findings
  *
  * The backend validates this as an enum, so a typo returns 422 rather than
  * quietly producing a chat answer where a report was asked for.
  */
-export type ChatMode = "qa" | "report";
+export type ChatMode = "qa" | "report" | "comparison";
 
 export interface ChatRequest {
   query: string;
@@ -173,6 +174,13 @@ export const api = {
        *  to the question — see attached_text on the backend schema. */
       attachedText?: string;
       attachedWarnings?: string[];
+      /**
+       * A previous report to compare against. Measurements in both are
+       * paired and differenced on the server before the model sees them,
+       * so the output narrates settled arithmetic rather than computing
+       * it — and never characterises a difference as growth.
+       */
+      priorText?: string;
     }
   ): AsyncGenerator<SSEEvent> {
     const url = `${API_BASE_URL}/api/v1/chat`;
@@ -188,6 +196,7 @@ export const api = {
         include_sources: options?.includeSources ?? true,
         attached_text: options?.attachedText ?? null,
         attached_warnings: options?.attachedWarnings ?? null,
+        prior_text: options?.priorText ?? null,
       }),
     });
 
@@ -509,6 +518,27 @@ export interface ReportStats {
   approval_rate: number;
 }
 
+
+export interface QualityIssue {
+  /**
+   * Stable identifier for the rule that fired. Stable on purpose: the
+   * project's success metric is a reduction in these counts over time, which
+   * means nothing if the identifier changes between releases.
+   */
+  code: string;
+  severity: "error" | "warning" | "info";
+  message: string;
+  line: number | null;
+  excerpt: string;
+}
+
+export interface QualityCheckResponse {
+  issues: QualityIssue[];
+  errors: number;
+  warnings: number;
+  is_clean: boolean;
+}
+
 export const reportApi = {
   /**
    * Persist a draft the model just produced.
@@ -572,6 +602,20 @@ export const reportApi = {
 
   remove: (id: string) =>
     fetchAPI<{ message: string }>(`/api/v1/reports/${id}`, { method: "DELETE" }),
+
+  /**
+   * Check a draft for defects. Stateless — the text does not need saving
+   * first, so the editor can run this as the reviewer types.
+   *
+   * Deterministic rules, no model: the same draft always produces the same
+   * flags, and a clean report produces silence.
+   */
+  qualityCheck: (text: string) =>
+    fetchAPI<QualityCheckResponse>("/api/v1/reports/quality-check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }),
 
   stats: () => fetchAPI<ReportStats>("/api/v1/reports/stats"),
 };

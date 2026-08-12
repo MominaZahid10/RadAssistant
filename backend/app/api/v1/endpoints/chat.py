@@ -102,6 +102,7 @@ async def _complete_response(request: ChatRequest) -> ChatResponse:
             audience=request.audience.value,
             attached_text=request.attached_text,
             attached_warnings=request.attached_warnings,
+            prior_text=request.prior_text,
         )
     except RuntimeError as e:
         # No LLM provider configured, or all providers failed
@@ -179,6 +180,7 @@ async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
             audience=request.audience.value,
             attached_text=request.attached_text,
             attached_warnings=request.attached_warnings,
+            prior_text=request.prior_text,
         )
 
         # ── Event 1: Sources ──

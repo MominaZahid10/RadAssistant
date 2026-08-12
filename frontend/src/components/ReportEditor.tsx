@@ -24,7 +24,12 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { reportApi, type Report, type ReportStatus } from "@/lib/api";
+import {
+  reportApi,
+  type QualityIssue,
+  type Report,
+  type ReportStatus,
+} from "@/lib/api";
 
 interface Props {
   /** The model's original output. Never modified here. */
@@ -69,6 +74,33 @@ export default function ReportEditor({
   }, [draft, touched]);
 
   const edited = text.trim() !== draft.trim();
+
+  // ── Quality checks ───────────────────────────────────────────
+  // ⚠️  ADVISORY, NEVER BLOCKING.
+  // The rules are good but not omniscient, and a radiologist who cannot sign
+  // a correct report because a regex disagrees will stop using the tool
+  // entirely. Issues are shown; Approve stays enabled.
+  const [issues, setIssues] = useState<QualityIssue[]>([]);
+
+  useEffect(() => {
+    if (!text.trim()) {
+      setIssues([]);
+      return;
+    }
+    // Debounced so it runs on pauses, not keystrokes. The check is pure
+    // regex server-side — no model, no database — so 400ms is comfortable.
+    const t = setTimeout(() => {
+      reportApi
+        .qualityCheck(text)
+        .then((r) => setIssues(r.issues))
+        // A failed check must not disturb review. Silence beats an error
+        // banner over a report the radiologist is trying to read.
+        .catch(() => setIssues([]));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [text]);
+
+  const errorCount = issues.filter((i) => i.severity === "error").length;
 
   /** Create the row on first save; update it thereafter. */
   async function persist(nextStatus?: ReportStatus, note?: string) {
@@ -152,6 +184,22 @@ export default function ReportEditor({
 
       {error && <p className="report-error">{error}</p>}
 
+      {issues.length > 0 && (
+        <ul className="report-issues">
+          {issues.map((issue, n) => (
+            <li key={`${issue.code}-${n}`} className={`report-issue report-issue--${issue.severity}`}>
+              <span className="report-issue-dot" aria-hidden />
+              <span>
+                {issue.line != null && (
+                  <span className="report-issue-line">line {issue.line}</span>
+                )}
+                {issue.message}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
       <div className="report-actions">
         {status === "approved" ? (
           <button
@@ -166,11 +214,23 @@ export default function ReportEditor({
           <>
             <button
               className="report-btn report-btn--approve"
+              // NOT disabled by outstanding issues — see the note above the
+              // quality effect. The reviewer is told; the reviewer decides.
               disabled={busy || !text.trim()}
               onClick={() => persist("approved")}
-              title="Sign off on this wording"
+              title={
+                errorCount
+                  ? `Sign off despite ${errorCount} unresolved issue${
+                      errorCount === 1 ? "" : "s"
+                    }`
+                  : "Sign off on this wording"
+              }
             >
-              {busy ? "Saving…" : "Approve"}
+              {busy
+                ? "Saving…"
+                : errorCount
+                ? `Approve anyway (${errorCount})`
+                : "Approve"}
             </button>
 
             <button

@@ -721,3 +721,44 @@ body {
   font-size: 0.65rem; font-style: italic;
   color: var(--foreground-muted, #8b8b8b);
 }
+
+/* ── Quality issues (Phase 5, Step 3) ────────────────────────────
+   Advisory, never blocking. Sits between the text and the actions so
+   it is read before signing, without standing in the way of it. */
+.report-issues {
+  list-style: none; margin: 0;
+  padding: 0.45rem 0.9rem 0.2rem;
+  border-top: 1px solid var(--border, #2a2a2a);
+}
+.report-issue {
+  display: flex; align-items: flex-start; gap: 0.45rem;
+  padding: 0.18rem 0;
+  font-size: 0.68rem; line-height: 1.45;
+  color: var(--foreground-muted, #8b8b8b);
+}
+.report-issue-dot {
+  flex-shrink: 0; margin-top: 0.38rem;
+  width: 0.36rem; height: 0.36rem; border-radius: 50%;
+}
+.report-issue--error   .report-issue-dot { background: #f87171; }
+.report-issue--warning .report-issue-dot { background: #f0c000; }
+.report-issue--info    .report-issue-dot { background: #6b7280; }
+.report-issue--error   { color: #fca5a5; }
+.report-issue--warning { color: #e5c76b; }
+.report-issue-line {
+  margin-right: 0.35rem; opacity: 0.7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Attachment failures used to be invisible — the composer simply did not
+   change, which is indistinguishable from the click not registering. */
+.attach-error {
+  margin-bottom: 0.5rem; padding: 0.4rem 0.7rem;
+  border: 1px solid #7f1d1d; border-radius: 0.4rem;
+  background: #2a0f0f; color: #fca5a5; font-size: 0.7rem;
+}
+.attach-error button {
+  margin-left: 0.4rem; text-decoration: underline;
+  color: inherit; opacity: 0.8; cursor: pointer;
+  background: none; border: 0; font-size: inherit;
+}

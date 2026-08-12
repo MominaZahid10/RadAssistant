@@ -136,6 +136,26 @@ FORMATTING:
 """.strip()
 
 
+# Comparison output is read alongside two documents, not filed in a record, so
+# citing background is useful — but the same rule holds as for reports: the
+# literature never contributes a finding about this patient.
+COMPARISON_GROUNDING_SCAFFOLD = """
+GROUNDING RULES — these are non-negotiable:
+1. The two reports are the ONLY source of content about this patient. The
+   CONTEXT below describes OTHER patients and can never add, remove or
+   reinterpret a finding here.
+2. Cite background as [1], [2] only where it explains a term. Never cite in
+   support of a difference between the two studies — no paper knows this
+   patient.
+3. If no source genuinely applies, cite nothing. An empty background column
+   is more honest than a loosely related reference.
+
+FORMATTING:
+- Markdown headings and short bullets. Quote both reports verbatim.
+- No preamble, no commentary about what you did.
+""".strip()
+
+
 # ── Q&A / Decision Support prompts (audience-keyed) ──
 # The register changes; the grounding rules don't.
 QA_SYSTEM_PROMPTS: dict[str, str] = {
@@ -260,6 +280,84 @@ subject of the answer.
 
 Never state a diagnosis of your own. The report's author has already made the
 clinical judgement; your role is to make it legible and add context.
+""".strip()
+
+
+# ── Prior-study comparison prompt (Phase 5, Step 4) ──
+#
+# ⚠️  THE JUDGEMENT THIS MUST REFUSE TO MAKE.
+# A nodule reported as 8mm previously and 9mm now is either interval growth,
+# or inter-reader variation, or a different axis measured on a different
+# slice. Two reports cannot distinguish these. 1mm on a small nodule is within
+# measurement variability, and calling it growth can trigger a biopsy.
+#
+# The measurements are paired and differenced deterministically before the
+# model sees them (comparison_service), so its job is to narrate settled
+# arithmetic, not to compute or characterise it.
+COMPARISON_PROMPT = """
+You are RadAssist AI, comparing a prior radiology study against the current
+one for a radiologist.
+
+BOTH DOCUMENTS ARE THE ONLY SOURCE OF CONTENT. The retrieved literature is
+background; it describes other patients and contributes nothing about this one.
+
+1. NEVER CHARACTERISE A DIFFERENCE. State both values and stop.
+       "reported as 8mm previously and 9mm now"          ✓
+       "1mm interval growth"                             ✗
+       "mild progression"                                ✗
+       "stable disease"                                  ✗
+       "improved"  /  "worsened"  /  "responding"        ✗
+   Whether a difference is real change or inter-reader variation is a clinical
+   judgement these two documents do not support. Two radiologists measure the
+   same lesion differently, on different slices, along different axes — that
+   is normal and expected, and 1mm on a small nodule sits well inside it.
+
+2. QUOTE BOTH REPORTS. Every row names what the prior said and what the
+   current says, in their own words. Do not paraphrase a measurement, a
+   vertebral level, or a laterality.
+
+3. THE MEASUREMENT BLOCK BELOW IS ALREADY COMPUTED. Use those numbers as
+   given. Do not recompute, round, average, or convert them.
+
+4. ABSENCE IS NOT RESOLUTION. A finding missing from the current report may
+   have resolved, or may simply not have been mentioned — a chest film
+   reported for one question often says nothing about everything else. Write
+   "not mentioned in the current report", never "resolved", unless the current
+   report says so explicitly.
+
+5. NEVER ADD A FINDING that neither document states.
+
+6. ONE FINDING, ONE SECTION. Each clinical finding appears EXACTLY ONCE in
+   your answer. If it is in "Reported differently" it is not also "Unchanged",
+   and not also "Not mentioned now".
+
+   ⚠️  A REPORT STATES ITS FINDINGS TWICE — once under FINDINGS and again
+   under IMPRESSION. Those are the SAME finding, not two:
+
+       FINDINGS:   "An anterior wedge deformity of T12 with a 50% loss..."
+       IMPRESSION: "T12 compression fracture with 50% decrease..."
+
+   Treat that pair as one item. Reading the impression as a separate finding
+   makes it look absent from the current study when it is not, and the same
+   observation then lands in three sections at once — which tells the reader
+   nothing and hides the one difference that matters.
+
+7. MATCH ON MEANING, NOT WORDING. "Lumbar hyperlordosis" and "the lumbar
+   spine is hyperlordotic" are the same finding stated two ways. That belongs
+   in "Unchanged" — a rephrasing is not a change. Reserve "Reported
+   differently" for a difference in SUBSTANCE: a number, a level, a
+   laterality, a severity.
+
+STRUCTURE YOUR ANSWER as four sections, omitting any that are empty:
+
+- **New** — in the current report, absent from the prior
+- **Not mentioned now** — in the prior report, absent from the current
+- **Unchanged** — reported the same in both, quoted
+- **Reported differently** — present in both with different wording or
+  numbers. Give both, side by side, and characterise nothing.
+
+End with: *Comparison of reported text only. Interval change requires
+radiologist review of the images.*
 """.strip()
 
 
@@ -959,6 +1057,7 @@ class RAGService:
         audience: str = "radiologist",
         attached_text: str | None = None,
         attached_warnings: list[str] | None = None,
+        prior_text: str | None = None,
     ) -> list[dict]:
         """
         Assemble the full message list for the LLM.
@@ -971,7 +1070,12 @@ class RAGService:
         header that the LLM can cite inline.
         """
         # ── Select the mode-specific system prompt ──
-        if mode == "report":
+        # Comparison is checked FIRST. It also arrives with attached_text (the
+        # prior study), so any later branch would swallow it and the model
+        # would analyse one document instead of comparing two.
+        if mode == "comparison" or prior_text:
+            role_prompt = COMPARISON_PROMPT
+        elif mode == "report":
             role_prompt = REPORT_SYSTEM_PROMPT
         elif mode == "report_analysis" or attached_text:
             # An uploaded document changes the task fundamentally: the model
@@ -1032,18 +1136,47 @@ class RAGService:
                 + "\nEND OF UPLOADED DOCUMENT" + caveat + "\n"
             )
 
+        # ── Prior study, and the arithmetic already done on it ──
+        prior_block = ""
+        if prior_text:
+            from app.services.comparison_service import (
+                compare_measurements,
+                format_facts,
+            )
+
+            # ⚠️  NUMBERS ARE PAIRED AND DIFFERENCED BEFORE THE MODEL SEES THEM.
+            # Measurements are where a language model is least reliable and
+            # where an error costs most — Phase 4 opened with a stated 50%
+            # coming back as "25-50%". The comparison is computed here and
+            # handed over as settled fact, so the model narrates rather than
+            # calculates.
+            facts = format_facts(compare_measurements(prior_text, attached_text or query))
+
+            prior_block = (
+                "\n\n" + "=" * 60 + "\n"
+                "PRIOR STUDY — for comparison\n"
+                + "=" * 60 + "\n"
+                + prior_text
+                + "\n" + "=" * 60
+                + "\nEND OF PRIOR STUDY\n"
+                + (f"\n{facts}\n" if facts else "")
+            )
+
         # ⚠️  THE SCAFFOLD MUST MATCH THE MODE.
         # GROUNDING_SCAFFOLD mandates a citation on every claim. Appending it
         # to REPORT_SYSTEM_PROMPT — which forbids citations in the report body
         # — gave the model two contradictory instructions, and the longer,
         # more detailed one won. Drafts came back reading "Mild cardiomegaly. 1".
-        scaffold = (
-            REPORT_GROUNDING_SCAFFOLD if mode == "report" else GROUNDING_SCAFFOLD
-        )
+        if mode == "comparison" or prior_text:
+            scaffold = COMPARISON_GROUNDING_SCAFFOLD
+        elif mode == "report":
+            scaffold = REPORT_GROUNDING_SCAFFOLD
+        else:
+            scaffold = GROUNDING_SCAFFOLD
 
         system_content = (
             f"{role_prompt}\n\n{scaffold}"
-            f"{document_block}\n{context_block}"
+            f"{prior_block}{document_block}\n{context_block}"
         )
 
         return [
@@ -1077,6 +1210,7 @@ class RAGService:
         source_type: str | None = None,
         attached_text: str | None = None,
         attached_warnings: list[str] | None = None,
+        prior_text: str | None = None,
     ) -> RAGResult:
         """
         Full RAG pipeline: retrieve → build prompt → generate.
@@ -1114,7 +1248,12 @@ class RAGService:
         # to draft a report because the knowledge base has nothing similar
         # would make the feature fail on exactly the unusual findings where a
         # structured draft is most useful.
-        if mode != "report" and not attached_text and not self._has_relevant_context(context):
+        if (
+            mode not in ("report", "comparison")
+            and not attached_text
+            and not prior_text
+            and not self._has_relevant_context(context)
+        ):
             logger.info("No relevant context for query: %s (best score: %.3f)",
                         query, context[0].score if context else 0.0)
             return RAGResult(
@@ -1132,6 +1271,7 @@ class RAGService:
         messages = self.build_messages(
             query, context, mode=mode, audience=audience,
             attached_text=attached_text, attached_warnings=attached_warnings,
+            prior_text=prior_text,
         )
 
         # 4. Generate the answer.
@@ -1157,6 +1297,7 @@ class RAGService:
         source_type: str | None = None,
         attached_text: str | None = None,
         attached_warnings: list[str] | None = None,
+        prior_text: str | None = None,
     ) -> tuple[list[RetrievedChunk], AsyncIterator[str]]:
         """
         Streaming RAG pipeline: retrieve → build prompt → stream tokens.
@@ -1194,7 +1335,12 @@ class RAGService:
         # to draft a report because the knowledge base has nothing similar
         # would make the feature fail on exactly the unusual findings where a
         # structured draft is most useful.
-        if mode != "report" and not attached_text and not self._has_relevant_context(context):
+        if (
+            mode not in ("report", "comparison")
+            and not attached_text
+            and not prior_text
+            and not self._has_relevant_context(context)
+        ):
             logger.info("No relevant context (streaming) for: %s", query)
 
             async def _no_context_stream() -> AsyncIterator[str]:
@@ -1211,6 +1357,7 @@ class RAGService:
         messages = self.build_messages(
             query, context, mode=mode, audience=audience,
             attached_text=attached_text, attached_warnings=attached_warnings,
+            prior_text=prior_text,
         )
 
         # 4. Stream the answer, normalising citation brackets per token.

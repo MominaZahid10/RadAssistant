@@ -133,10 +133,12 @@ def test_dicom_is_detected_without_a_file_extension(monkeypatch):
 
 # NOTE: 404-on-unknown-id is deliberately NOT tested here.
 # It requires a live database, and this suite is DB-free by design — that's
-# what keeps it at ~15s and runnable on every save. The 404 path is covered
-# by verify_phase4.sh against a running stack, where it's a more honest test
-# anyway. Validation that happens BEFORE the database is reached (below) is
-# fair game.
+# what keeps it fast and runnable on every save. Validation that happens
+# BEFORE the database is reached (below) is fair game.
+#
+# ⚠️  THIS PATH IS NOW UNCOVERED. It used to be checked end-to-end against a
+# running stack. If a DB-backed integration suite is added, the 404 — and the
+# fact that it is 404 rather than 403 for someone else's image — belongs in it.
 
 
 def test_malformed_uuid_returns_422():

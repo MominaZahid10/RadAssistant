@@ -96,6 +96,11 @@ services:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - DEBUG=true
+      # ⚠️  LEAVE THIS OFF UNLESS YOU ARE DEBUGGING A QUERY.
+      # It logs every SQL statement in full, which includes the report text
+      # in each INSERT — dictated findings and generated drafts written to the
+      # container log. It used to be tied to DEBUG and was therefore always on.
+      - SQL_ECHO=${SQL_ECHO:-false}
       - UPLOAD_DIR=/app/uploads
       - IMAGE_DIR=/app/images
       # Python block-buffers stdout when it isn't a TTY, so print() output sits

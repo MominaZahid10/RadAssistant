@@ -14,6 +14,7 @@
 from app.models.document import Document  # noqa: F401
 from app.models.image import MedicalImage  # noqa: F401 — Phase 4
 from app.models.report import Report, ReportStatus  # noqa: F401 — Phase 5
+from app.models.user import User  # noqa: F401 — Phase 6
 
 # ⚠️  EVERY model must be imported here. Alembic's autogenerate
 # compares Base.metadata against the live database — a model that

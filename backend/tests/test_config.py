@@ -122,3 +122,56 @@ def test_embedding_dimension_matches_default_model(monkeypatch):
     settings = Settings(_env_file=None)
     if settings.EMBEDDING_MODEL == "all-MiniLM-L6-v2":
         assert settings.EMBEDDING_DIMENSION == 384
+
+
+# ══════════════════════════════════════════════════════════════
+# SQL ECHO — a privacy setting, not a verbosity one
+# ══════════════════════════════════════════════════════════════
+
+
+def test_sql_echo_is_off_by_default():
+    """
+    ⚠️  THIS FLAG LOGS PATIENT TEXT.
+    The engine was created with `echo=settings.DEBUG`, and DEBUG is true in
+    docker-compose. Every statement was logged in full, including the INSERT
+    that stores a report — dictated findings and generated drafts written to
+    the container log on every save, where Docker retains them.
+
+    It must default OFF and must not be re-tied to DEBUG.
+    """
+    from app.config import Settings
+
+    assert Settings().SQL_ECHO is False
+
+
+def test_sql_echo_is_independent_of_debug(monkeypatch):
+    """
+    DEBUG legitimately controls the docs endpoint and error verbosity, both
+    wanted in development. Query echo is the one that writes clinical content
+    to disk, so it has to be asked for by name.
+    """
+    from app.config import Settings
+
+    monkeypatch.setenv("DEBUG", "true")
+    settings = Settings()
+    assert settings.DEBUG is True
+    assert settings.SQL_ECHO is False
+
+
+def test_engine_reads_sql_echo_not_debug():
+    """
+    Regression guard on the wiring, not the setting.
+
+    Comments are stripped before matching: the note explaining WHY this
+    changed necessarily quotes the old `echo=settings.DEBUG`, and a naive
+    substring search fails on the explanation rather than the code.
+    """
+    import inspect
+    from app.core import database
+
+    code = "\n".join(
+        line for line in inspect.getsource(database).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    assert "echo=settings.SQL_ECHO" in code
+    assert "echo=settings.DEBUG" not in code

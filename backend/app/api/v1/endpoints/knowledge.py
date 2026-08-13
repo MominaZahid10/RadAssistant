@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.database import get_db, async_session
+from app.core.limits import EXTERNAL_FETCH, per_user
 from app.models.document import Document
 from app.schemas.document import (
     DocumentResponse,
@@ -673,6 +674,10 @@ async def fetch_pmc(
     "/fetch-figures",
     status_code=status.HTTP_202_ACCEPTED,
     summary="Download figures from ingested PMC articles",
+    # ⚠️  NCBI RATE-LIMITS ON THEIR SIDE, AND A BAN HITS EVERYONE.
+    # One user triggering it would block the whole deployment, not just
+    # themselves.
+    dependencies=[Depends(per_user(EXTERNAL_FETCH, "external"))],
     description=(
         "Extracts figures and captions from the open-access articles already "
         "in the corpus, and stores them as images linked to their parent "

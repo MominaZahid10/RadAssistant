@@ -35,6 +35,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.api.v1.router import api_v1_router
+from app.core import errors
 from app.core.database import engine
 from app.models import Document  # noqa: F401 — Import so SQLAlchemy discovers it
 from app.services.embedding import embedding_service
@@ -213,6 +214,12 @@ app.add_middleware(
 
 
 # ── Register API Routes ─────────────────────────────────────
+# ⚠️  INSTALLED BEFORE THE ROUTES ARE MOUNTED.
+# Gives every request a correlation id and stops exception text reaching the
+# caller. Endpoints previously did `detail=f"Internal error: {e}"`, which
+# hands out file paths and driver messages. See app/core/errors.py.
+errors.install(app)
+
 app.include_router(api_v1_router)
 
 

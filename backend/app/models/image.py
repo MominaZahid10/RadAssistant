@@ -94,6 +94,18 @@ class MedicalImage(Base):
     # storing a fake midnight implies precision that isn't there.
     study_date = Column(Date, nullable=True)
 
+    # ── Ownership (Phase 6) ──────────────────────────────────
+    # ⚠️  THIS IS WHAT MAKES THE IMAGE ROUTES SAFE.
+    # /images/{id}/file returns the photograph of a patient's report. Without
+    # an owner, any signed-in user could fetch any image by id — and a UUID is
+    # not an access control. NULL for anything uploaded before auth existed.
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     # ── Provenance ───────────────────────────────────────────
     # 'dicom_upload' | 'report_upload' | 'pmc_figure' | 'image_upload'
     source_type = Column(String(50), nullable=False, default="image_upload", index=True)

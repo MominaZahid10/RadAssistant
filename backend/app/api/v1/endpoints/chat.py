@@ -38,7 +38,7 @@ import json
 import logging
 from typing import AsyncIterator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.schemas.rag import (
@@ -47,6 +47,7 @@ from app.schemas.rag import (
     SourceReference,
     ModelInfoResponse,
 )
+from app.core.limits import CHAT, per_user
 from app.services.rag_service import rag_service
 from app.services.llm_service import llm_service
 
@@ -68,6 +69,9 @@ router = APIRouter(prefix="/chat", tags=["chat"])
         "relevant evidence from the knowledge base and generates a grounded "
         "answer. Set `stream=true` for token-by-token SSE streaming."
     ),
+    # Every message is a paid model call. 20/min sits far above human typing
+    # speed and far below what a script could spend.
+    dependencies=[Depends(per_user(CHAT, "chat"))],
 )
 async def chat(request: ChatRequest):
     """
@@ -107,9 +111,13 @@ async def _complete_response(request: ChatRequest) -> ChatResponse:
     except RuntimeError as e:
         # No LLM provider configured, or all providers failed
         raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
+    except Exception:
+        # ⚠️  THE EXCEPTION IS NOT PUT IN THE RESPONSE.
+        # It used to be interpolated into `detail`, handing the caller file
+        # paths and driver messages. logger.exception records the traceback
+        # against this request's id; the caller gets that id and nothing else.
         logger.exception("Unexpected error in chat")
-        raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+        raise HTTPException(status_code=500, detail="Internal error.")
 
     # Build source references (only if requested)
     sources = None
@@ -216,9 +224,11 @@ async def _sse_generator(request: ChatRequest) -> AsyncIterator[str]:
         logger.error("Chat stream error: %s", e)
         yield _sse_event("error", {"error": str(e)})
 
-    except Exception as e:
+    except Exception:
         logger.exception("Unexpected error in chat stream")
-        yield _sse_event("error", {"error": f"Internal error: {e}"})
+        # Same reasoning as above: an SSE error event reaches the browser and
+        # ends up in client-side logs, so it carries no exception text either.
+        yield _sse_event("error", {"error": "Internal error."})
 
 
 def _sse_event(event: str, data: dict) -> str:

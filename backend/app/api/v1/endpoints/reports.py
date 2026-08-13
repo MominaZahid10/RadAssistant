@@ -20,11 +20,13 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.deps import get_current_user
 from app.models.report import Report, ReportStatus
+from app.models.user import User
 from app.schemas.report import (
     QualityCheckRequest,
     QualityCheckResponse,
@@ -39,6 +41,37 @@ from app.schemas.report import (
 from app.services.quality_service import check_report
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
+
+
+async def _owned(
+    report_id: uuid.UUID, user: User, db: AsyncSession
+) -> Report:
+    """
+    Fetch a report the caller owns, or 404.
+
+    ⚠️  404 AND NOT 403, DELIBERATELY.
+    403 says "this exists but is not yours" — which confirms the row exists,
+    and lets anyone with a list of ids learn which are real. 404 says nothing.
+    The caller cannot distinguish a report that never existed from one
+    belonging to somebody else, which is the whole point.
+
+    ⚠️  UNOWNED ROWS ARE VISIBLE TO EVERYONE, ON PURPOSE.
+    Reports created before authentication existed have user_id NULL. Hiding
+    them would strand the pilot's own history behind a rule about a period
+    when there were no users; claiming them for the first caller would
+    fabricate an attribution. They stay readable and stay unowned.
+    """
+    report = await db.get(Report, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if report.user_id is not None and report.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
+def _visible_to(user: User):
+    """WHERE clause for rows this user may see: their own, plus pre-auth rows."""
+    return or_(Report.user_id == user.id, Report.user_id.is_(None))
 
 
 def _to_response(report: Report) -> ReportResponse:
@@ -88,6 +121,7 @@ def _to_response(report: Report) -> ReportResponse:
 async def create_report(
     payload: ReportCreate,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     report = Report(
         findings_input=payload.findings_input,
@@ -96,6 +130,10 @@ async def create_report(
         sources=payload.sources,
         image_id=payload.image_id,
         status=ReportStatus.DRAFT,
+        # ⚠️  TAKEN FROM THE TOKEN, NEVER FROM THE REQUEST BODY.
+        # An owner field a client can set is not an owner field — the first
+        # thing anyone tries is posting someone else's id.
+        user_id=user.id,
     )
     db.add(report)
     await db.commit()
@@ -122,12 +160,24 @@ async def create_report(
         "signing it."
     ),
 )
-async def get_report_stats(db: AsyncSession = Depends(get_db)):
-    total = (await db.execute(select(func.count(Report.id)))).scalar() or 0
+async def get_report_stats(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    # ⚠️  SCOPED TO THE CALLER.
+    # An unscoped edit_rate would mix everyone's corrections together, so one
+    # careless user would move a number the others are being judged by — and
+    # it would leak how much work other people have done.
+    visible = _visible_to(user)
+
+    total = (await db.execute(
+        select(func.count(Report.id)).where(visible)
+    )).scalar() or 0
 
     by_status: dict[str, int] = {}
     rows = await db.execute(
-        select(Report.status, func.count(Report.id)).group_by(Report.status)
+        select(Report.status, func.count(Report.id))
+        .where(visible).group_by(Report.status)
     )
     for name, count in rows.all():
         by_status[name] = count
@@ -136,6 +186,7 @@ async def get_report_stats(db: AsyncSession = Depends(get_db)):
     # figure and the table grows without bound.
     edited = (await db.execute(
         select(func.count(Report.id))
+        .where(visible)
         .where(Report.edited_text.isnot(None))
         .where(func.btrim(Report.edited_text) != func.btrim(Report.ai_draft))
     )).scalar() or 0
@@ -208,9 +259,11 @@ async def list_reports(
         None, alias="status", description="Filter by lifecycle state."
     ),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    query = select(Report)
-    count_query = select(func.count(Report.id))
+    visible = _visible_to(user)
+    query = select(Report).where(visible)
+    count_query = select(func.count(Report.id)).where(visible)
 
     if status_filter:
         query = query.where(Report.status == status_filter.value)
@@ -232,11 +285,12 @@ async def list_reports(
 
 
 @router.get("/{report_id}", response_model=ReportResponse, summary="One report")
-async def get_report(report_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    report = await db.get(Report, report_id)
-    if report is None:
-        raise HTTPException(status_code=404, detail="Report not found")
-    return _to_response(report)
+async def get_report(
+    report_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return _to_response(await _owned(report_id, user, db))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -259,10 +313,9 @@ async def update_report(
     report_id: uuid.UUID,
     payload: ReportUpdate,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    report = await db.get(Report, report_id)
-    if report is None:
-        raise HTTPException(status_code=404, detail="Report not found")
+    report = await _owned(report_id, user, db)
 
     # ⚠️  THE GUARD THAT MAKES SIGN-OFF MEAN ANYTHING.
     # Approval is a claim about a specific wording. If an approved report
@@ -291,13 +344,20 @@ async def update_report(
 
         if payload.status in (ReportStatusEnum.APPROVED, ReportStatusEnum.REJECTED):
             report.reviewed_at = datetime.now(timezone.utc)
-            report.reviewed_by = payload.reviewed_by or report.reviewed_by
+            # ⚠️  FROM THE TOKEN, NOT FROM THE REQUEST.
+            # This is the line that turns sign-off from a claim into a record.
+            # It used to be `payload.reviewed_by` — a name the client typed,
+            # which anyone could set to anyone. A signature you can address to
+            # someone else is not a signature.
+            report.reviewed_by_user_id = user.id
+            report.reviewed_by = user.email
         else:
             # Reopened to draft: the previous sign-off no longer applies and
             # must not linger, or the report will show as reviewed by someone
             # who has not seen the current wording.
             report.reviewed_at = None
             report.reviewed_by = None
+            report.reviewed_by_user_id = None
 
     if payload.review_note is not None:
         report.review_note = payload.review_note
@@ -314,11 +374,12 @@ async def update_report(
 
 
 @router.delete("/{report_id}", summary="Delete a report")
-async def delete_report(report_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    report = await db.get(Report, report_id)
-    if report is None:
-        raise HTTPException(status_code=404, detail="Report not found")
-
+async def delete_report(
+    report_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    report = await _owned(report_id, user, db)
     await db.delete(report)
     await db.commit()
     return {"message": "Report deleted", "id": str(report_id)}

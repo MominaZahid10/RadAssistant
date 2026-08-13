@@ -73,3 +73,15 @@ httpx==0.27.0             # Modern async HTTP client — for fetching external m
 # Run with: cd backend && pytest tests/ -v
 pytest==8.3.2             # Test runner
 pytest-asyncio==0.24.0    # Lets pytest run `async def` tests (needed from Phase 3)
+
+# ── Authentication (Phase 6) ──────────────────────────────────
+bcrypt==4.2.0             # Password hashing. Deliberately slow and salted —
+                          # a fast hash is exactly what an attacker with the
+                          # database wants.
+email-validator==2.2.0    # Required by pydantic's EmailStr. Without it the
+                          # app raises at IMPORT time, not at first login —
+                          # a missing extra that reads as a broken build.
+PyJWT==2.9.0              # Token signing. Chosen over python-jose: fewer
+                          # transitive dependencies, and the algorithm is
+                          # pinned at the call site rather than inferred from
+                          # the token header.

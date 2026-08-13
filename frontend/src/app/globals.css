@@ -762,3 +762,76 @@ body {
   color: inherit; opacity: 0.8; cursor: pointer;
   background: none; border: 0; font-size: inherit;
 }
+
+/* ── Sign-in (Phase 6) ───────────────────────────────────────── */
+.login-shell {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100vh; padding: 1.5rem;
+  background: var(--background, #0a0a0a);
+}
+.login-card {
+  width: 100%; max-width: 22rem;
+  display: flex; flex-direction: column; gap: 0.9rem;
+  padding: 1.8rem;
+  border: 1px solid var(--border, #2a2a2a); border-radius: 0.75rem;
+  background: var(--background-secondary, #111);
+}
+.login-brand { text-align: center; margin-bottom: 0.4rem; }
+.login-logo { font-size: 1.9rem; }
+.login-brand h1 {
+  margin: 0.35rem 0 0.15rem; font-size: 1.1rem; font-weight: 600;
+  color: var(--foreground, #ededed);
+}
+.login-brand p {
+  margin: 0; font-size: 0.7rem; color: var(--foreground-muted, #8b8b8b);
+}
+.login-field { display: flex; flex-direction: column; gap: 0.3rem; }
+.login-field span {
+  font-size: 0.7rem; color: var(--foreground-muted, #8b8b8b);
+}
+.login-field input {
+  padding: 0.55rem 0.7rem; border-radius: 0.4rem;
+  border: 1px solid var(--border, #2a2a2a);
+  background: var(--surface, #161616); color: var(--foreground, #ededed);
+  font-size: 0.85rem; outline: none;
+}
+.login-field input:focus { border-color: var(--accent, #3b82f6); }
+.login-error {
+  margin: 0; padding: 0.45rem 0.6rem; border-radius: 0.4rem;
+  border: 1px solid #7f1d1d; background: #2a0f0f;
+  color: #fca5a5; font-size: 0.72rem;
+}
+.login-submit {
+  margin-top: 0.2rem; padding: 0.6rem;
+  border: 0; border-radius: 0.45rem;
+  background: var(--accent, #3b82f6); color: #fff;
+  font-size: 0.85rem; font-weight: 500; cursor: pointer;
+}
+.login-submit:disabled { opacity: 0.55; cursor: not-allowed; }
+.login-note {
+  margin: 0.3rem 0 0; text-align: center;
+  font-size: 0.62rem; line-height: 1.5;
+  color: var(--foreground-muted, #8b8b8b);
+}
+
+/* Signed-in user + sign out, in the header */
+.session-bar {
+  display: flex; align-items: center; gap: 0.5rem;
+  font-size: 0.68rem; color: var(--foreground-muted, #8b8b8b);
+}
+.session-bar button {
+  padding: 0.2rem 0.5rem; border-radius: 0.3rem;
+  border: 1px solid var(--border, #2a2a2a);
+  background: transparent; color: inherit;
+  font-size: 0.65rem; cursor: pointer;
+}
+.session-bar button:hover { border-color: var(--accent, #3b82f6); }
+
+.login-hint {
+  font-size: 0.62rem; color: var(--foreground-muted, #8b8b8b);
+}
+.login-switch {
+  background: none; border: 0; padding: 0.2rem;
+  color: var(--accent, #3b82f6); font-size: 0.72rem; cursor: pointer;
+}
+.login-switch:hover { text-decoration: underline; }

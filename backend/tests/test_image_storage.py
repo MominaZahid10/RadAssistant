@@ -218,16 +218,32 @@ def test_document_id_is_nullable():
     assert MedicalImage.__table__.columns["document_id"].nullable is True
 
 
-def test_document_fk_sets_null_rather_than_cascading():
+def test_every_fk_sets_null_rather_than_cascading():
     """
-    Deleting an article must not silently destroy its figures. An orphaned
-    image is recoverable; a deleted one is not.
+    Deleting an article must not silently destroy its figures, and deleting a
+    user must not destroy their uploads. An orphaned image is recoverable; a
+    deleted one is not.
+
+    ⚠️  ASSERTS THE BEHAVIOUR, NOT THE COUNT.
+    This used to read `len(fks) == 1`, which broke the moment Phase 6 added
+    user ownership — failing for a reason that had nothing to do with cascade
+    behaviour. Counting foreign keys tests the schema's shape; what actually
+    matters is that none of them cascades. Checking every FK also means a
+    future one is covered without anyone remembering to update a number.
     """
     from app.models.image import MedicalImage
 
     fks = list(MedicalImage.__table__.foreign_keys)
-    assert len(fks) == 1
-    assert fks[0].ondelete == "SET NULL"
+    assert fks, "the image table should reference something"
+
+    for fk in fks:
+        assert fk.ondelete == "SET NULL", (
+            f"{fk.target_fullname} cascades — deleting it would destroy images"
+        )
+
+    # The two relationships that exist today, named so a removal is visible.
+    targets = {fk.column.table.name for fk in fks}
+    assert {"documents", "users"} <= targets
 
 
 def test_study_date_is_a_date_not_a_datetime():

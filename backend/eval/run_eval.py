@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import time
@@ -123,10 +124,19 @@ def looks_like_refusal(answer: str) -> bool:
 # ══════════════════════════════════════════════════════════════
 
 
-def evaluate(api: str, questions: list[dict], limit: int, with_chat: bool) -> dict:
+def evaluate(
+    api: str, questions: list[dict], limit: int, with_chat: bool,
+    token: str | None = None,
+) -> dict:
     rows: list[dict] = []
 
-    with httpx.Client(base_url=api, timeout=90.0) as client:
+    # ⚠️  THE API REQUIRES AUTHENTICATION FROM PHASE 6 ONWARD.
+    # Without a token every question returns 401 and the run reports "22
+    # errored" — which looks like a retrieval collapse rather than a missing
+    # header, and would be a genuinely alarming thing to see in a results file.
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    with httpx.Client(base_url=api, timeout=90.0, headers=headers) as client:
         for q in questions:
             qid, category = q["id"], q["category"]
             should_answer = q.get("should_answer", True)
@@ -359,9 +369,37 @@ def main() -> int:
                    help="Save results as eval/results/NAME.json")
     p.add_argument("--vs", metavar="NAME",
                    help="Compare against a previously saved run")
+    # Credentials for the protected API. Read from the environment by
+    # preference so they do not land in shell history.
+    p.add_argument("--email", default=os.environ.get("RADASSIST_EMAIL"),
+                   help="Account to run as (or set RADASSIST_EMAIL).")
+    p.add_argument("--password", default=os.environ.get("RADASSIST_PASSWORD"),
+                   help="Password (or set RADASSIST_PASSWORD).")
     args = p.parse_args()
 
     questions = yaml.safe_load((EVAL_DIR / "questions.yaml").read_text(encoding="utf-8"))["questions"]
+
+    # ── Sign in ──────────────────────────────────────────────
+    token = None
+    if args.email and args.password:
+        try:
+            with httpx.Client(base_url=args.api, timeout=20.0) as c:
+                r = c.post("/api/v1/auth/login",
+                           json={"email": args.email, "password": args.password})
+                r.raise_for_status()
+                token = r.json()["access_token"]
+            print(f"{C_DIM}Signed in as {args.email}{C_END}")
+        except Exception as e:  # noqa: BLE001
+            print(f"{C_BAD}Sign-in failed: {e}{C_END}")
+            return 1
+    else:
+        # Fail here rather than after 22 timeouts. A results file full of 401s
+        # is worse than no results file: it looks like a measurement.
+        print(f"{C_BAD}Credentials required — the API is authenticated.{C_END}")
+        print(f"{C_DIM}  $env:RADASSIST_EMAIL='you@example.org'{C_END}")
+        print(f"{C_DIM}  $env:RADASSIST_PASSWORD='...'{C_END}")
+        print(f"{C_DIM}  ...or pass --email and --password{C_END}")
+        return 1
 
     baseline = None
     if args.vs:
@@ -391,7 +429,7 @@ def main() -> int:
         print(f"{C_DIM}Start it with: docker-compose up -d{C_END}\n")
         return 1
 
-    report = evaluate(args.api, questions, args.limit, args.with_chat)
+    report = evaluate(args.api, questions, args.limit, args.with_chat, token)
     print_report(report, baseline)
 
     if args.save:

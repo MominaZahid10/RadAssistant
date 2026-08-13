@@ -36,8 +36,13 @@ settings = get_settings()
 # ── Engine: The connection pool ──────────────────────────────
 engine = create_async_engine(
     settings.DATABASE_URL,
-    # Log every SQL query to console (helpful for learning/debugging)
-    echo=settings.DEBUG,
+    # ⚠️  WAS `echo=settings.DEBUG`, AND DEBUG IS TRUE IN docker-compose.
+    # That logged every statement in full, including the INSERT carrying a
+    # report's dictated findings and generated draft — patient text written to
+    # the container log on every save. SQL_ECHO is a separate flag, defaulted
+    # off, so switching it on is a decision rather than a side effect of
+    # running in development. See app/config.py.
+    echo=settings.SQL_ECHO,
     # Keep up to 5 connections open, allow bursting to 10
     pool_size=5,
     max_overflow=10,

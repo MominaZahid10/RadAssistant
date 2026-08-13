@@ -26,6 +26,7 @@ REUSES THE PATTERNS THAT ALREADY WORK:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -41,11 +42,14 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.database import async_session, get_db
+from app.core.deps import get_current_user
+from app.core.limits import UPLOAD, per_user
+from app.models.user import User
 from app.models.image import MedicalImage
 from app.schemas.image import (
     ImageListResponse,
@@ -58,6 +62,7 @@ from app.services import dicom_service, image_processing, image_storage
 from app.services.vision_service import VisionError, vision_service
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/images", tags=["Images"])
 
@@ -65,6 +70,34 @@ router = APIRouter(prefix="/images", tags=["Images"])
 # ══════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════
+
+
+def _visible_to(user: User):
+    """Rows this user may see: their own, plus anything uploaded pre-auth."""
+    return or_(MedicalImage.user_id == user.id, MedicalImage.user_id.is_(None))
+
+
+async def _owned(
+    image_id: uuid.UUID, user: User, db: AsyncSession
+) -> MedicalImage:
+    """
+    Fetch an image the caller owns, or 404.
+
+    ⚠️  THIS IS THE MOST IMPORTANT OWNERSHIP CHECK IN THE SYSTEM.
+    /images/{id}/file returns the actual photograph of a patient's report. A
+    UUID is not an access control — ids leak through logs, browser history,
+    referrer headers and screenshots — so until this existed, any signed-in
+    user holding an id could fetch any image.
+
+    404 rather than 403: 403 confirms the row exists, which is itself
+    information. The caller cannot tell "never existed" from "not yours".
+    """
+    img = await db.get(MedicalImage, image_id)
+    if img is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    if img.user_id is not None and img.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return img
 
 
 def _with_urls(img: MedicalImage) -> ImageResponse:
@@ -210,8 +243,8 @@ async def _process_upload(
                     thumb_rel, image_processing.make_thumbnail(stored_bytes)
                 )
                 fields["thumbnail_path"] = thumb_rel
-            except Exception as e:  # noqa: BLE001
-                print(f"⚠️  Thumbnail failed for {image_id}: {e}")
+            except Exception:  # noqa: BLE001
+                logger.warning("Thumbnail failed for %s", image_id, exc_info=True)
 
             fields["status"] = "completed"
             fields["error_message"] = None
@@ -219,8 +252,21 @@ async def _process_upload(
         except (dicom_service.DicomError, image_processing.ImageProcessingError) as e:
             # Expected, user-facing failures — report them verbatim.
             fields = {"status": "failed", "error_message": str(e)}
-        except Exception as e:  # noqa: BLE001
-            fields = {"status": "failed", "error_message": f"Internal error: {e}"}
+        except Exception:  # noqa: BLE001
+            # ⚠️  error_message IS RETURNED BY THE API.
+            # The two handled cases above are messages written for the user
+            # ("the image is blurred", "pydicom is not installed"). This one
+            # is whatever the exception happened to say — a file path, a
+            # driver message — and it would be served back through
+            # GET /images/{id}. Logged in full, returned generically.
+            logger.exception("Image processing failed for %s", image_id)
+            fields = {
+                "status": "failed",
+                "error_message": (
+                    "This file could not be processed. If it is a valid "
+                    "image or DICOM file, please report it."
+                ),
+            }
 
         try:
             img = await db.get(MedicalImage, image_id)
@@ -229,9 +275,9 @@ async def _process_upload(
                     setattr(img, key, value)
                 img.updated_at = datetime.now(timezone.utc)
                 await db.commit()
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             await db.rollback()
-            print(f"❌ Could not record image result for {image_id}: {e}")
+            logger.exception("Could not record image result for %s", image_id)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -244,6 +290,8 @@ async def _process_upload(
     response_model=ImageUploadResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Upload a DICOM study, report photo, or image",
+    # Each upload runs OCR and a vision model, and writes to disk.
+    dependencies=[Depends(per_user(UPLOAD, "upload"))],
     description=(
         "Accepts DICOM files, photographs or scans of paper reports, and "
         "standard images (PNG/JPG/TIFF).\n\n"
@@ -271,6 +319,7 @@ async def upload_image(
         description="Optional link to an existing text document.",
     ),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     if not file.filename:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Filename is required.")
@@ -315,6 +364,9 @@ async def upload_image(
         document_id=document_id,
         status="processing",
         is_deidentified=False,      # never assumed — set only after it runs
+        # ⚠️  FROM THE TOKEN, NEVER FROM THE FORM.
+        # An owner a client can set is not an owner.
+        user_id=user.id,
     )
     db.add(img)
     await db.commit()
@@ -356,8 +408,9 @@ async def list_images(
     status_filter: str | None = None,
     document_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    query = select(MedicalImage)
+    query = select(MedicalImage).where(_visible_to(user))
     count_q = select(func.count(MedicalImage.id))
 
     for column, value in (
@@ -391,12 +444,23 @@ async def list_images(
 # FastAPI matches routes in declaration order, so a later /stats would be
 # swallowed by /{image_id} and fail UUID validation with a confusing 422.
 @router.get("/stats", response_model=ImageStats, summary="Image statistics")
-async def image_stats(db: AsyncSession = Depends(get_db)):
-    total = (await db.execute(select(func.count(MedicalImage.id)))).scalar() or 0
+async def image_stats(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    # Scoped to the caller — an unscoped count would report how many images
+    # other people have uploaded, which is nobody else's business.
+    visible = _visible_to(user)
+
+    total = (await db.execute(
+        select(func.count(MedicalImage.id)).where(visible)
+    )).scalar() or 0
 
     async def count_where(condition) -> int:
         return (
-            await db.execute(select(func.count(MedicalImage.id)).where(condition))
+            await db.execute(
+                select(func.count(MedicalImage.id)).where(visible).where(condition)
+            )
         ).scalar() or 0
 
     by_source = {
@@ -404,6 +468,7 @@ async def image_stats(db: AsyncSession = Depends(get_db)):
         for row in (
             await db.execute(
                 select(MedicalImage.source_type, func.count(MedicalImage.id))
+                .where(visible)
                 .group_by(MedicalImage.source_type)
             )
         ).all()
@@ -413,6 +478,7 @@ async def image_stats(db: AsyncSession = Depends(get_db)):
         for row in (
             await db.execute(
                 select(MedicalImage.modality, func.count(MedicalImage.id))
+                .where(visible)
                 .where(MedicalImage.modality.isnot(None))
                 .group_by(MedicalImage.modality)
             )
@@ -435,24 +501,38 @@ async def image_stats(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{image_id}", response_model=ImageResponse, summary="Image metadata")
-async def get_image(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    img = await db.get(MedicalImage, image_id)
+async def get_image(
+    image_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    img = await _owned(image_id, user, db)
     if img is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Image {image_id} not found.")
     return _with_urls(img)
 
 
 @router.get("/{image_id}/file", summary="The image file")
-async def get_image_file(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    return await _serve(image_id, db, thumbnail=False)
+async def get_image_file(
+    image_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await _serve(image_id, db, thumbnail=False, user=user)
 
 
 @router.get("/{image_id}/thumbnail", summary="256px preview")
-async def get_image_thumbnail(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    return await _serve(image_id, db, thumbnail=True)
+async def get_image_thumbnail(
+    image_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await _serve(image_id, db, thumbnail=True, user=user)
 
 
-async def _serve(image_id: uuid.UUID, db: AsyncSession, thumbnail: bool):
+async def _serve(
+    image_id: uuid.UUID, db: AsyncSession, thumbnail: bool, user: User
+):
     """
     Stream a stored file.
 
@@ -460,8 +540,14 @@ async def _serve(image_id: uuid.UUID, db: AsyncSession, thumbnail: bool):
     which rejects anything outside the storage root. Clients never supply a
     path — only an id — so there's no user-controlled component in the
     filesystem lookup at all.
+
+    ⚠️  AND THE ID IS NOT ENOUGH ON ITS OWN.
+    This returns the photograph of a patient's report. Knowing a UUID must not
+    be sufficient to read it, because ids leak through logs, browser history,
+    referrer headers and screenshots. _owned() is what makes possession of an
+    id insufficient.
     """
-    img = await db.get(MedicalImage, image_id)
+    img = await _owned(image_id, user, db)
     if img is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Image {image_id} not found.")
 
@@ -500,7 +586,11 @@ async def _serve(image_id: uuid.UUID, db: AsyncSession, thumbnail: bool):
 
 
 @router.delete("/{image_id}", summary="Delete an image")
-async def delete_image(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def delete_image(
+    image_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     """
     Remove the database row and both files.
 
@@ -508,9 +598,7 @@ async def delete_image(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     orphaned file wastes disk, but an orphaned row breaks every listing that
     tries to serve it.
     """
-    img = await db.get(MedicalImage, image_id)
-    if img is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Image {image_id} not found.")
+    img = await _owned(image_id, user, db)
 
     removed = []
     for rel in (img.storage_path, img.thumbnail_path):

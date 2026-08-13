@@ -53,6 +53,25 @@ class Settings(BaseSettings):
     APP_VERSION: str = "0.1.0"
     DEBUG: bool = True
 
+    # ⚠️  SEPARATE FROM DEBUG, AND DEFAULTED OFF. THIS ONE LOGS PATIENT TEXT.
+    #
+    # The engine was created with `echo=settings.DEBUG`, and DEBUG is true in
+    # docker-compose. Every statement was therefore logged in full — including
+    # the INSERT that stores a report:
+    #
+    #   INSERT INTO reports (findings_input, ai_draft, ...) VALUES
+    #     ('Mild cardiomegaly. No pleural effusion...', '**FINDINGS** ...')
+    #
+    # So dictated findings and generated drafts were being written to the
+    # container log on every save, where Docker retains them. A privacy
+    # problem wearing the costume of a verbosity setting.
+    #
+    # DEBUG legitimately controls the docs endpoint and error verbosity, both
+    # of which you want during development. Query echo is the one that writes
+    # clinical content to disk, so it gets its own flag and has to be asked
+    # for by name.
+    SQL_ECHO: bool = False
+
     # ── Database (PostgreSQL) ─────────────────────────────────
     # For local dev: runs in Docker. For production: Supabase URL.
     DATABASE_URL: str = "postgresql+asyncpg://radassist:radassist_secret@postgres:5432/radassist_db"
@@ -220,6 +239,45 @@ class Settings(BaseSettings):
     # Without a key: 3 requests/sec. With key: 10 requests/sec.
     NCBI_API_KEY: str = ""
     NCBI_EMAIL: str = ""  # NCBI requires an email for API access
+
+    # ── Authentication (Phase 6) ──────────────────────────────
+    #
+    # ⚠️  JWT_SECRET DEFAULTS TO EMPTY, AND THAT IS THE POINT.
+    # A signing key with a real fallback works in development, ships to
+    # production unnoticed, and is shared by every deployment that ever cloned
+    # this repository — so anyone holding the default can mint a valid token
+    # for any user on any instance. app/core/security.py refuses to issue or
+    # verify a token without one, with a message explaining how to generate it.
+    #
+    #     python -c "import secrets; print(secrets.token_urlsafe(48))"
+    JWT_SECRET: str = ""
+
+    # Short-lived on purpose. There is no refresh token: a pilot with named
+    # users can sign in again, and a refresh token is a second long-lived
+    # credential to store, rotate and revoke. Adding one without a revocation
+    # story would be worse than not having it.
+    JWT_EXPIRE_MINUTES: int = 720   # 12 hours — one clinical shift
+
+    # ⚠️  SELF-SERVICE SIGNUP. SAFE *BECAUSE* OF OWNERSHIP, NOT INSTEAD OF IT.
+    #
+    # Open registration was rejected earlier on the grounds that anyone who
+    # found the URL could read uploaded patient reports. That was true while
+    # every signed-in user saw every report — and it stopped being true the
+    # moment reports and images got an owner (migration 0006). A new account
+    # now lands in an empty workspace.
+    #
+    # So the two must move together. If ownership were ever reverted, this
+    # would have to be turned off in the same change.
+    #
+    # Default ON so a demo, a reviewer or a portfolio visitor can try the
+    # system. A real clinical deployment sets it false and goes back to
+    # operator-created accounts (scripts/create_user.py), because there
+    # "anyone with the URL" genuinely is the wrong answer.
+    ALLOW_REGISTRATION: bool = True
+
+    # Enforced where a password is SET, not where it is checked. A length
+    # rule on the login form only tells an attacker the policy.
+    MIN_PASSWORD_LENGTH: int = 12
 
     # ── CORS (Cross-Origin Resource Sharing) ──────────────────
     # Allows the frontend (port 3000) to call the backend (port 8000).

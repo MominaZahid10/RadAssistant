@@ -80,11 +80,29 @@ class Report(Base):
 
     status = Column(String(20), nullable=False, default=ReportStatus.DRAFT, index=True)
 
+    # ── Ownership (Phase 6) ──────────────────────────────────
+    # ⚠️  NULLABLE, AND PRE-AUTH ROWS STAY NULL.
+    # Backfilling old reports to whoever registered first would fabricate an
+    # attribution — the exact thing an audit trail exists to prevent, and
+    # worse than a gap because a gap is visibly a gap.
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     # ── Review trail ─────────────────────────────────────────
-    # No auth yet (Phase 6), so reviewer is free text for now. The column
-    # exists so sign-off has somewhere to land the moment auth arrives —
-    # retrofitting an audit trail after the fact means the early records
-    # simply have no reviewer, forever.
+    # ⚠️  reviewed_by_user_id IS THE REAL ONE.
+    # `reviewed_by` was free text written before authentication existed — a
+    # self-declared name, which is not an audit trail. It is kept because it
+    # holds the only record of who claimed those early approvals, thin as
+    # that evidence is.
+    reviewed_by_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     reviewed_by = Column(String(200), nullable=True)
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
     review_note = Column(Text, nullable=True)

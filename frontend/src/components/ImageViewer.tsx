@@ -15,7 +15,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { type MedicalImage, imageUrl } from "@/lib/api";
+import { type MedicalImage, fetchImageObjectUrl } from "@/lib/api";
 
 interface Props {
   image: MedicalImage;
@@ -43,7 +43,33 @@ export default function ImageViewer({ image, onClose }: Props) {
     };
   }, [onClose]);
 
-  const src = imageUrl(image.file_url);
+  // ⚠️  FETCHED WITH THE AUTH HEADER, NOT SET AS A BARE src.
+  // A browser-issued <img> request carries no Authorization header, so once
+  // /images/{id}/file required a token this silently showed a broken image.
+  // Putting the token in the URL instead would leak it through logs, history
+  // and referrer headers — the same objection that made a bare UUID
+  // unacceptable as an access control for these files.
+  const [src, setSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let created: string | null = null;
+
+    fetchImageObjectUrl(image.file_url).then((url) => {
+      if (cancelled) {
+        if (url) URL.revokeObjectURL(url);
+        return;
+      }
+      created = url;
+      setSrc(url);
+    });
+
+    return () => {
+      cancelled = true;
+      // An object URL pins the full-resolution image in memory until revoked.
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [image.file_url]);
 
   const meta: Array<[string, string | null]> = [
     ["Modality", image.modality],

@@ -19,6 +19,13 @@
  *   for await (const event of stream) { ... }
  */
 
+import {
+  authHeader,
+  clearSession,
+  type CurrentUser,
+  type LoginResult,
+} from "@/lib/auth";
+
 // Backend URL — reads from .env.local, falls back to Docker default
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -36,9 +43,22 @@ async function fetchAPI<T>(
     ...options,
     headers: {
       "Content-Type": "application/json",
+      // ⚠️  ATTACHED HERE, ONCE, FOR EVERY CALL.
+      // Adding the header at each call site means a new endpoint added later
+      // is unauthenticated by default and fails with a 401 nobody expects.
+      ...authHeader(),
       ...options.headers,
     },
   });
+
+  // ⚠️  401 IS HANDLED CENTRALLY, NOT PER CALLER.
+  // A token expires mid-session — twelve hours in, halfway through a report.
+  // Without this the user sees an unexplained error on every action and has
+  // no way to know they simply need to sign in again.
+  if (response.status === 401) {
+    clearSession();
+    throw new Error("Your session has expired. Please sign in again.");
+  }
 
   // If the response isn't OK (2xx), throw a descriptive error
   if (!response.ok) {
@@ -187,7 +207,11 @@ export const api = {
 
     const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // ⚠️  streamChat DOES NOT GO THROUGH fetchAPI — it reads the body as a
+      // stream — so the token and the 401 handling have to be repeated here.
+      // Easy to miss, and the symptom would be that chat alone stays broken
+      // after login while everything else works.
+      headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify({
         query,
         stream: true,
@@ -199,6 +223,11 @@ export const api = {
         prior_text: options?.priorText ?? null,
       }),
     });
+
+    if (response.status === 401) {
+      clearSession();
+      throw new Error("Your session has expired. Please sign in again.");
+    }
 
     if (!response.ok) {
       const errorBody = await response.text();
@@ -394,8 +423,16 @@ export const imageApi = {
     // include the multipart boundary — setting it manually breaks the upload.
     const res = await fetch(`${API_BASE_URL}/api/v1/images/upload`, {
       method: "POST",
+      // Only the auth header — NOT Content-Type. The browser must set that
+      // itself so it can include the multipart boundary.
+      headers: { ...authHeader() },
       body: form,
     });
+
+    if (res.status === 401) {
+      clearSession();
+      throw new Error("Your session has expired. Please sign in again.");
+    }
 
     if (!res.ok) {
       const body = await res.text();
@@ -619,3 +656,118 @@ export const reportApi = {
 
   stats: () => fetchAPI<ReportStats>("/api/v1/reports/stats"),
 };
+
+// ══════════════════════════════════════════════════════════════
+// AUTH (Phase 6)
+// ══════════════════════════════════════════════════════════════
+
+export const authApi = {
+  /**
+   * Exchange email and password for a bearer token.
+   *
+   * There is no register() — accounts are created by an operator running
+   * scripts/create_user.py. A public registration endpoint on a clinical tool
+   * would let anyone who finds the URL create an account and read uploaded
+   * patient reports.
+   */
+  login: async (email: string, password: string): Promise<LoginResult> => {
+    const res = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+
+    if (res.status === 401) {
+      // The server deliberately does not distinguish "no such account" from
+      // "wrong password" — doing so would turn the login form into an
+      // account enumerator. Repeat its wording rather than inventing a more
+      // specific one here.
+      throw new Error("Incorrect email or password.");
+    }
+    if (!res.ok) {
+      throw new Error(`Sign-in failed (${res.status}).`);
+    }
+    return res.json();
+  },
+
+  /**
+   * Create an account and sign in.
+   *
+   * ⚠️  SAFE BECAUSE OF OWNERSHIP, NOT INSTEAD OF IT.
+   * Open signup would be wrong if every signed-in user could see every
+   * report. Reports and images carry an owner, so a new account lands in an
+   * empty workspace. The server can disable this entirely with
+   * ALLOW_REGISTRATION=false, which a clinical deployment should do.
+   */
+  register: async (
+    email: string,
+    password: string,
+    fullName?: string
+  ): Promise<LoginResult> => {
+    const res = await fetch(`${API_BASE_URL}/api/v1/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password,
+        full_name: fullName || null,
+      }),
+    });
+
+    if (res.status === 403) {
+      throw new Error(
+        "Registration is disabled on this deployment. Ask an administrator " +
+          "to create your account."
+      );
+    }
+    if (res.status === 409) {
+      throw new Error("An account with that email already exists.");
+    }
+    if (res.status === 422) {
+      throw new Error("Password must be at least 12 characters.");
+    }
+    if (!res.ok) {
+      throw new Error(`Could not create the account (${res.status}).`);
+    }
+    return res.json();
+  },
+
+  me: () => fetchAPI<CurrentUser>("/api/v1/auth/me"),
+};
+
+/**
+ * Fetch an image with the auth header and return an object URL.
+ *
+ * ⚠️  WHY THIS EXISTS AT ALL.
+ * `<img src="/api/v1/images/x/file">` is a browser-issued request. It carries
+ * cookies but NOT an Authorization header, so once the image routes required
+ * a token every thumbnail broke — silently, as a broken-image icon.
+ *
+ * The obvious workaround is `?token=...` in the URL. That is exactly what the
+ * auth design already rejects: a token in a URL leaks through server logs,
+ * browser history, referrer headers and screenshots — the same argument that
+ * made a bare UUID unacceptable as an access control.
+ *
+ * So the bytes are fetched properly and handed to the browser as a blob.
+ *
+ * ⚠️  THE CALLER MUST REVOKE THE URL.
+ * An object URL pins the whole image in memory until revoked. A gallery that
+ * creates them per render and never releases them will grow without bound.
+ */
+export async function fetchImageObjectUrl(
+  path: string | null
+): Promise<string | null> {
+  if (!path) return null;
+
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    headers: { ...authHeader() },
+  });
+
+  if (res.status === 401) {
+    clearSession();
+    return null;
+  }
+  if (!res.ok) return null;
+
+  return URL.createObjectURL(await res.blob());
+}

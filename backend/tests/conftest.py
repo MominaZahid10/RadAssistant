@@ -80,3 +80,55 @@ def _stub_heavy_dependencies() -> None:
 
 
 _stub_heavy_dependencies()
+
+
+# ══════════════════════════════════════════════════════════════
+# AUTHENTICATED BY DEFAULT (Phase 6, Step 2)
+# ══════════════════════════════════════════════════════════════
+#
+# ⚠️  WHY THIS IS autouse, AND WHY THAT IS SAFE.
+#
+# Every clinical route now requires a signed-in user. Without this, 25 tests
+# that have nothing to do with authentication would fail with 401 — and the
+# obvious "fix" is to weaken the protection until the suite goes green, which
+# is how a security control gets quietly reverted.
+#
+# So the dependency is OVERRIDDEN rather than the protection removed. Tests
+# for chat, images and reports carry on testing chat, images and reports.
+#
+# This cannot hide a genuine authorisation hole, because the tests that check
+# protection do not go through a client at all: tests/test_authz.py inspects
+# the router's dependency graph directly, so an override at the app level is
+# invisible to it. The one file that could be fooled is the one file that
+# does not use this.
+
+import uuid as _uuid
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _authenticated_by_default():
+    """Stand in for a signed-in user on every request the tests make."""
+    # Imported lazily: app.main pulls in the whole application, and doing that
+    # at conftest import time would run before the stubs above are installed.
+    from app.core.deps import get_current_user
+    from app.main import app
+    from app.models.user import User
+
+    stand_in = User(
+        id=_uuid.uuid4(),
+        email="test-suite@radassist.local",
+        hashed_password="not-a-real-hash",
+        full_name="Test Suite",
+        is_active=True,
+        is_admin=True,
+    )
+
+    app.dependency_overrides[get_current_user] = lambda: stand_in
+    try:
+        yield stand_in
+    finally:
+        # Removed rather than left in place, so a test that deliberately
+        # exercises the unauthenticated path can clear it and get a real 401.
+        app.dependency_overrides.pop(get_current_user, None)

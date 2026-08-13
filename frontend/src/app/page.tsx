@@ -13,14 +13,21 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import {
   api,
   imageApi,
-  imageUrl,
   type SSEEvent,
   type SourceReference,
   type Audience,
   type ChatMode,
   type MedicalImage,
 } from "@/lib/api";
+import { useRouter } from "next/navigation";
 import ImageViewer from "@/components/ImageViewer";
+import AuthedImage from "@/components/AuthedImage";
+import {
+  AUTH_EXPIRED_EVENT,
+  clearSession,
+  getStoredEmail,
+  isSignedIn,
+} from "@/lib/auth";
 import ReportEditor from "@/components/ReportEditor";
 
 interface Message {
@@ -399,10 +406,11 @@ function SourceFigures({
           // The caption IS the alt text — authored, not inferred.
           title={fig.caption ?? "Figure"}
         >
-          <img
-            src={imageUrl(fig.thumbnail_url)!}
+          {/* Fetched with the auth header — a plain <img src> cannot send
+              one, so protecting the image routes broke every thumbnail. */}
+          <AuthedImage
+            path={fig.thumbnail_url}
             alt={fig.caption ?? "Figure from the cited article"}
-            loading="lazy"
           />
         </button>
       ))}
@@ -421,6 +429,10 @@ export default function ChatPage() {
   // Files staged in the composer, not yet uploaded.
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [viewing, setViewing] = useState<MedicalImage | null>(null);
+  const router = useRouter();
+  // null while we have not yet checked — avoids flashing the chat UI to a
+  // signed-out user before the redirect lands.
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
   // Surfaced under the composer. Attachment used to fail with no feedback at
   // all, which is indistinguishable from the click not registering.
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -430,6 +442,27 @@ export default function ChatPage() {
   const abortRef = useRef<AbortController | null>(null);
   // Lets regenerateReport call handleSend, which is defined further down.
   const sendRef = useRef<(() => void) | null>(null);
+
+  // ── Session guard ─────────────────────────────────────────
+  // ⚠️  A CLIENT-SIDE REDIRECT IS NOT THE SECURITY BOUNDARY.
+  // It is a courtesy: without it a signed-out user sees a chat window where
+  // every action fails with a 401 they cannot interpret. The actual control
+  // is server-side — every clinical route requires a token, so bypassing this
+  // redirect gets you an empty interface and nothing else.
+  useEffect(() => {
+    const present = isSignedIn();
+    setSignedIn(present);
+    if (!present) router.replace("/login");
+
+    // Fired by lib/auth when a 401 clears the token mid-session — twelve
+    // hours in, halfway through a report.
+    const onExpired = () => {
+      setSignedIn(false);
+      router.replace("/login");
+    };
+    window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+  }, [router]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -745,8 +778,34 @@ export default function ChatPage() {
     }
   };
 
+  // Nothing is rendered until the session check has run. Showing the chat to
+  // a signed-out user for a frame and then redirecting looks like a glitch,
+  // and briefly displays an interface where every action would 401.
+  if (signedIn === null) return null;
+  if (!signedIn) return null;
+
   return (
     <div className="flex flex-col h-screen">
+      {/* Who is signed in, and a way out. Without this there is no route back
+          to the login screen short of clearing storage by hand — and on a
+          shared workstation "sign out" is what stops the next person's
+          approvals being attributed to you. */}
+      <div className="flex justify-end px-4 pt-2">
+        <div className="session-bar">
+          <span>{getStoredEmail()}</span>
+          <button
+            onClick={() => {
+              // notify=false: we navigate deliberately here, so the
+              // "session expired" listener must not also fire.
+              clearSession(false);
+              router.replace("/login");
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto">
         {messages.length === 0 ? (
@@ -881,9 +940,8 @@ export default function ChatPage() {
                           }
                         >
                           {img.thumbnail_url ? (
-                            /* eslint-disable-next-line @next/next/no-img-element */
-                            <img
-                              src={imageUrl(img.thumbnail_url)!}
+                            <AuthedImage
+                              path={img.thumbnail_url}
                               alt={img.filename}
                             />
                           ) : (

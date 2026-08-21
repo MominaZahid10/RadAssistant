@@ -70,7 +70,50 @@ do
     WAITED=$((WAITED + 2))
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then
         echo "❌ PostgreSQL was not ready after ${MAX_WAIT}s."
-        echo "   Check it directly:  docker-compose logs postgres"
+        echo ""
+        # ⚠️  RUN IT ONCE MORE WITH STDERR VISIBLE.
+        # The loop above sends stderr to /dev/null so a database still in
+        # recovery does not print a wall of identical tracebacks. The cost is
+        # that EVERY failure looks like "still starting" — including a wrong
+        # password, which will never resolve no matter how long you wait.
+        # Twenty minutes of watching a counter, and the answer was one line
+        # that had been suppressed the whole time.
+        echo "   The last connection attempt reported:"
+        python - <<'DIAG' 2>&1 | sed 's/^/   /'
+import asyncio, os, urllib.parse as up
+url = os.environ.get("DATABASE_URL", "")
+parsed = up.urlparse(url.replace("postgresql+asyncpg://", "postgresql://"))
+
+async def check():
+    import asyncpg
+    conn = await asyncpg.connect(
+        user=up.unquote(parsed.username or ""),
+        password=up.unquote(parsed.password or ""),
+        database=(parsed.path or "/").lstrip("/"),
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+    )
+    await conn.close()
+
+try:
+    asyncio.run(check())
+except Exception as exc:
+    print(f"{type(exc).__name__}: {exc}")
+    # The two that actually happen, and what they mean:
+    if "password authentication failed" in str(exc):
+        print("")
+        print("POSTGRES_PASSWORD does not match what this volume was created")
+        print("with. Postgres applies that variable ONLY when initialising an")
+        print("empty data directory — changing it later has no effect on an")
+        print("existing volume. Either set it to the original value, or")
+        print("destroy the volume (docker compose down -v) and start fresh.")
+    elif "does not exist" in str(exc):
+        print("")
+        print("The database named in DATABASE_URL is not the one this volume")
+        print("holds. Check POSTGRES_DB.")
+DIAG
+        echo ""
+        echo "   Full server log:  docker compose logs postgres"
         exit 1
     fi
     printf '   still starting (%ss)\n' "$WAITED"

@@ -44,7 +44,14 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      # ⚠️  -d IS NOT OPTIONAL. Without it pg_isready defaults the database
+      # name to the USERNAME, so it probes for a database called "radassist"
+      # that has never existed. The check still passes — the server answered,
+      # which is all pg_isready asks — but every probe logs
+      # `FATAL: database "radassist" does not exist` into the Postgres log,
+      # ten seconds apart, forever. When something else then goes wrong, that
+      # is the first thing you see and it points nowhere.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-radassist_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -72,11 +79,13 @@ services:
     container_name: radassist-backend
     restart: unless-stopped
     command: sh /app/start.sh
-    # Bound to loopback only. The reverse proxy in front reaches it on the
-    # host; the internet does not reach it directly, so there is no path that
-    # skips TLS.
-    ports:
-      - "127.0.0.1:8000:8000"
+    # ⚠️  NO PUBLISHED PORT. Caddy reaches this as `backend:8000` on the
+    # compose network, so there is no host binding at all and therefore no
+    # route to the API that skips TLS.
+    #
+    # To reach it from the server for debugging:
+    #   docker compose -f docker-compose.prod.yml exec backend \
+    #       python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/api/v1/health').read())"
     env_file:
       - ./backend/.env
     environment:
@@ -142,7 +151,58 @@ services:
       qdrant:
         condition: service_healthy
 
+  # ── TLS and routing ──────────────────────────────────────────
+  # The only service exposed to the internet. Obtains and renews a Let's
+  # Encrypt certificate by itself.
+  caddy:
+    image: caddy:2-alpine
+    container_name: radassist-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # ⚠️  PORT 80 IS NOT OPTIONAL EVEN THOUGH THE SITE IS HTTPS.
+      # Let's Encrypt's HTTP-01 challenge is answered on port 80. Firewall it
+      # off and certificate issuance fails with a message about the challenge
+      # timing out, which reads like a DNS problem and is not one.
+      - "443:443"
+      - "443:443/udp"          # HTTP/3
+    environment:
+      # The public hostname of THIS SERVER (the API). See env.prod.example.
+      - SITE_ADDRESS=${SITE_ADDRESS:?set SITE_ADDRESS, e.g. 203-0-113-5.sslip.io}
+      # Where the app actually lives, for anyone who hits the bare API host.
+      # Ignored by Caddyfile.selfhosted, which serves the app itself.
+      - APP_URL=${APP_URL:-https://vercel.app}
+    volumes:
+      # Which Caddyfile depends on where the frontend is hosted:
+      #   ./Caddyfile              API only; app on Vercel  (default)
+      #   ./Caddyfile.selfhosted   API + app, all on this box
+      - ${CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro
+      # ⚠️  NAMED VOLUME FOR THE CERTIFICATES, NOT A THROWAWAY LAYER.
+      # Lose this and every restart re-requests a certificate. Let's Encrypt
+      # rate-limits per hostname per week; a container that restarts a few
+      # times while you debug something can exhaust that allowance and lock
+      # you out of HTTPS for days.
+      - caddy_data:/data
+      - caddy_config:/config
+      - caddy_logs:/var/log/caddy
+    # ⚠️  BACKEND ONLY. `frontend` is behind a profile and usually absent;
+    # depending on it would make `up` fail with "service not found" in the
+    # default deployment.
+    depends_on:
+      - backend
+
+  # ── The Next.js app ──────────────────────────────────────────
+  # ⚠️  OFF BY DEFAULT. The recommended deployment puts the frontend on
+  # Vercel: it builds and serves Next.js better than this container will,
+  # deploys itself on every push, costs nothing, and frees ~400MB of RAM on a
+  # 4GB box that is already running two ML models.
+  #
+  # This service exists for the on-premise case — a hospital network where an
+  # external CDN is not permitted, or an air-gapped install. Start it with:
+  #     docker compose -f docker-compose.prod.yml --profile selfhosted up -d
+  # and set CADDYFILE=./Caddyfile.selfhosted so Caddy routes to it.
   frontend:
+    profiles: ["selfhosted"]
     build:
       context: ./frontend
       dockerfile: Dockerfile.prod
@@ -153,15 +213,18 @@ services:
         # the value is already baked into the JavaScript the browser fetches.
         # Change this and you must rebuild, not just restart.
         #
-        # This is the PUBLIC address of the API as a BROWSER sees it — your
+        # This is the PUBLIC ORIGIN of the API as a BROWSER sees it — your
         # domain, not an internal Docker hostname. `http://backend:8000`
         # resolves inside the network and nowhere else; a browser given that
         # URL fails every request.
-        - NEXT_PUBLIC_API_URL=${PUBLIC_API_URL:?set PUBLIC_API_URL, e.g. https://radassistant.example.com/api}
+        #
+        # ⚠️  ORIGIN ONLY — NO PATH. lib/api.ts builds every call as
+        # `${API_BASE_URL}/api/v1/...`, so adding "/api" here produces
+        # /api/api/v1/chat and every request 404s.
+        - NEXT_PUBLIC_API_URL=${PUBLIC_API_URL:?set PUBLIC_API_URL, e.g. https://203-0-113-5.sslip.io}
     container_name: radassist-frontend
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:3000:3000"
+    # No published port — Caddy reaches this as `frontend:3000`.
     depends_on:
       - backend
 
@@ -170,3 +233,6 @@ volumes:
   qdrant_data:
   uploads_data:
   images_data:
+  caddy_data:      # certificates — see the warning above
+  caddy_config:
+  caddy_logs:

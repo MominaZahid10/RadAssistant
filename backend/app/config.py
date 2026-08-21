@@ -97,10 +97,24 @@ class Settings(BaseSettings):
     # Which LLM provider to use: "groq", "mistral", or "openai"
     LLM_PROVIDER: str = "groq"
 
+    # ── Daily spend ceilings (public deployment) ─────────────
+    # A per-minute rate limit stops a burst; it is not a budget. These bound
+    # what a day can cost.
+    #
+    # CHAT_DAILY_PER_USER matters most on a public demo where everyone shares
+    # one published login — there, "one account" is "everybody", so this is
+    # effectively the public allowance.
+    #
+    # ⚠️  NEITHER REPLACES A HARD SPEND CAP ON THE PROVIDER'S DASHBOARD.
+    # These counters are in-process and a restart clears them, which is
+    # harmless for a 60-second window and meaningful for a 24-hour one.
+    CHAT_DAILY_PER_USER: int = 200
+    CHAT_DAILY_PER_INSTANCE: int = 1000
+
     # Model override — leave blank to auto-select per provider:
     #   groq    → llama-3.3-70b-versatile
     #   mistral → mistral-large-latest
-    #   openai  → gpt-4o-mini
+    #   openai  → gpt-5.6-luna
     LLM_MODEL: str = ""
 
     # Temperature: 0.0–1.0.  Low = deterministic, factual.

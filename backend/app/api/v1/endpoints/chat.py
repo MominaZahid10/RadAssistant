@@ -47,7 +47,13 @@ from app.schemas.rag import (
     SourceReference,
     ModelInfoResponse,
 )
-from app.core.limits import CHAT, per_user
+from app.core.limits import (
+    CHAT,
+    CHAT_DAILY,
+    INSTANCE_DAILY,
+    per_instance,
+    per_user,
+)
 from app.services.rag_service import rag_service
 from app.services.llm_service import llm_service
 
@@ -71,7 +77,19 @@ router = APIRouter(prefix="/chat", tags=["chat"])
     ),
     # Every message is a paid model call. 20/min sits far above human typing
     # speed and far below what a script could spend.
-    dependencies=[Depends(per_user(CHAT, "chat"))],
+    # ⚠️  THREE CEILINGS, ANSWERING THREE DIFFERENT QUESTIONS.
+    #   CHAT           — burst control. Stops a script hammering the endpoint.
+    #   CHAT_DAILY     — what one account may spend in a day. On a public
+    #                    demo with one shared login, this is the public
+    #                    allowance.
+    #   INSTANCE_DAILY — what the whole deployment may spend in a day.
+    # A per-minute cap alone permits 28,800 paid calls a day, which is a
+    # burst limit wearing a budget's clothes.
+    dependencies=[
+        Depends(per_user(CHAT, "chat")),
+        Depends(per_user(CHAT_DAILY, "chat-daily")),
+        Depends(per_instance(INSTANCE_DAILY, "chat-daily")),
+    ],
 )
 async def chat(request: ChatRequest):
     """

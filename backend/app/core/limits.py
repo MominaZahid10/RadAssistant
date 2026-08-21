@@ -46,8 +46,11 @@ from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
 
+from app.config import get_settings
 from app.core.deps import get_current_user
 from app.models.user import User
+
+settings = get_settings()
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,36 @@ _window = SlidingWindow()
 # Every message is an LLM call. 20/min is far above human typing speed and
 # far below what a script could spend.
 CHAT = Limit(20, 60)
+
+# ══════════════════════════════════════════════════════════════
+# DAILY CEILINGS — FOR A PUBLICLY REACHABLE DEPLOYMENT
+# ══════════════════════════════════════════════════════════════
+# ⚠️  A PER-MINUTE CAP IS NOT A BUDGET.
+# CHAT allows 20/min, which is 28,800 messages a day if something keeps
+# asking. On a free provider that just returns 429s; on a paid one it is an
+# invoice. The per-minute limit exists to stop a burst — it says nothing
+# about the total.
+#
+# Two ceilings, because they answer different questions:
+#
+#   CHAT_DAILY     — what ONE account may spend in a day. On a public demo
+#                    where everyone shares one published login, this is the
+#                    number that matters, because "one account" is
+#                    "everybody".
+#
+#   INSTANCE_DAILY — what the WHOLE deployment may spend in a day, across
+#                    every account. The backstop if accounts multiply.
+#
+# ⚠️  AND NEITHER IS THE REAL GUARANTEE. Read the in-memory warning at the
+# top of this file: these counters live in this process and a restart clears
+# them. Over a 60-second window that is irrelevant. Over 24 HOURS it is not —
+# a crash-looping container would reset its daily budget on every restart.
+# The authoritative spend control is the hard cap set on the PROVIDER's
+# dashboard, which no bug in this file can bypass. What follows is defence
+# in depth and a fast, legible 429 for the user; it is not the thing
+# standing between you and a bill.
+CHAT_DAILY = Limit(settings.CHAT_DAILY_PER_USER, 86400)
+INSTANCE_DAILY = Limit(settings.CHAT_DAILY_PER_INSTANCE, 86400)
 
 # Each upload runs OCR and a vision model, and writes to disk.
 UPLOAD = Limit(10, 60)
@@ -203,6 +236,30 @@ def per_ip(limit: Limit, bucket: str):
     """
     async def dependency(request: Request) -> None:
         retry_after = _window.check(f"{bucket}:ip:{_client_ip(request)}", limit)
+        if retry_after is not None:
+            raise _too_many(limit, retry_after)
+
+    return dependency
+
+
+def per_instance(limit: Limit, bucket: str):
+    """
+    Limit across the WHOLE deployment, not per user or per address.
+
+    ⚠️  DELIBERATELY A SHARED COUNTER, WITH THE CONSEQUENCE STATED.
+    Every caller lands in one bucket, so a single busy visitor can exhaust
+    the allowance for everybody. That is the point — the limit exists to
+    bound what the deployment can spend in a day, and spend does not care
+    which account incurred it.
+
+    It also means this is a denial-of-service someone could trigger
+    deliberately on a public instance. That trade is acceptable for a demo,
+    where the alternative is an uncapped bill; it would NOT be acceptable for
+    a service anyone depends on. Raise the number, or drop this dependency,
+    before this instance becomes something people rely on.
+    """
+    async def dependency() -> None:
+        retry_after = _window.check(f"{bucket}:instance", limit)
         if retry_after is not None:
             raise _too_many(limit, retry_after)
 

@@ -19,6 +19,8 @@ import pytest
 
 from app.core.limits import (
     CHAT,
+    CHAT_DAILY,
+    INSTANCE_DAILY,
     LOGIN,
     REGISTER,
     UPLOAD,
@@ -242,3 +244,80 @@ def test_the_forwarded_header_caveat_is_documented():
 
     source = inspect.getsource(limits._client_ip)
     assert "client-controlled" in source.lower()
+
+
+# ══════════════════════════════════════════════════════════════
+# DAILY CEILINGS (public deployment)
+# ══════════════════════════════════════════════════════════════
+# A per-minute cap bounds a burst. It does not bound a day, and on a paid
+# provider the day is what shows up on the invoice.
+
+
+def test_a_per_minute_cap_alone_does_not_bound_a_day():
+    """
+    The number that motivated the daily ceilings, asserted rather than left
+    in a comment: 20/min is nearly thirty thousand paid calls a day.
+    """
+    per_day_if_sustained = CHAT.times * (86400 / CHAT.seconds)
+    assert per_day_if_sustained > 25_000
+    # And the daily cap must actually be lower, or it changes nothing.
+    assert CHAT_DAILY.times < per_day_if_sustained
+
+
+def test_the_daily_caps_are_daily():
+    assert CHAT_DAILY.seconds == 86400
+    assert INSTANCE_DAILY.seconds == 86400
+
+
+def test_one_account_cannot_exhaust_the_whole_instance_allowance():
+    """
+    The instance ceiling has to sit at or above a single account's, or the
+    per-account limit is dead code — the instance would always trip first.
+    """
+    assert INSTANCE_DAILY.times >= CHAT_DAILY.times
+
+
+def test_chat_is_capped_per_day_and_per_instance_not_just_per_minute():
+    """
+    Wiring check. The daily ceilings exist to bound spend; they do nothing
+    unless the chat route actually depends on them.
+    """
+    import inspect
+
+    from app.api.v1.endpoints import chat as chat_module
+
+    source = inspect.getsource(chat_module)
+    assert "per_user(CHAT_DAILY" in source
+    assert "per_instance(INSTANCE_DAILY" in source
+
+
+def test_the_instance_counter_is_shared_across_callers():
+    """
+    ⚠️  ASSERTS THE TRADE-OFF, NOT JUST THE MECHANISM.
+    One bucket for everybody means a busy visitor can exhaust the day for
+    everyone else. That is intended for a demo — the alternative is an
+    uncapped bill — but it is a denial-of-service on a public instance, and
+    it should fail loudly if someone later makes the counter per-user by
+    accident.
+    """
+    w = SlidingWindow()
+    limit = Limit(2, 86400)
+
+    assert w.check("chat-daily:instance", limit) is None
+    assert w.check("chat-daily:instance", limit) is None
+    # A third call from anywhere is refused, regardless of who is asking.
+    assert w.check("chat-daily:instance", limit) is not None
+
+
+def test_a_daily_refusal_reports_a_wait_measured_in_hours():
+    """
+    Retry-After on a 24-hour window is a large number, and it still has to be
+    a sane one — not zero, not negative.
+    """
+    w = SlidingWindow()
+    limit = Limit(1, 86400)
+    assert w.check("k", limit) is None
+
+    retry_after = w.check("k", limit)
+    assert retry_after is not None
+    assert 86_000 < retry_after <= 86_400

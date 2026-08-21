@@ -61,7 +61,14 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODELS: dict[str, str] = {
     "groq": "openai/gpt-oss-120b",
     "mistral": "mistral-large-latest",
-    "openai": "gpt-4o-mini",
+    # ⚠️  THIS CONSTANT IS WHAT THE OPENAI PATH ACTUALLY USES.
+    # `_resolve_model` honours settings.LLM_MODEL only on the PRIMARY
+    # provider. When OpenAI is configured as a FALLBACK — which is the
+    # recommended shape for this deployment, Groq first for speed and cost,
+    # OpenAI to catch a rate limit or a retired Groq model — LLM_MODEL is
+    # ignored and this default is what runs. Leaving a stale name here means
+    # the fallback 404s at exactly the moment it was supposed to save you.
+    "openai": "gpt-5.6-luna",
 }
 
 # Provider priority for fallback — tried in this order.

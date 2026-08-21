@@ -14,10 +14,35 @@
 # test tooling. That is a smaller attack surface as much as a smaller image —
 # nothing in the runtime layer can be used to build or run arbitrary code
 # that wasn't already compiled in.
+#
+# ══════════════════════════════════════════════════════════════
+# ⚠️  DEBIAN (slim), NOT ALPINE
+# ══════════════════════════════════════════════════════════════
+# Three build dependencies ship PRE-COMPILED PLATFORM BINARIES rather than
+# portable JavaScript — @tailwindcss/oxide, lightningcss, and sharp. Alpine
+# (musl) and Debian (glibc) therefore need different artifacts, and sharp in
+# particular has a long history of musl problems. Debian is the safer base
+# and the size difference does not matter for this image.
+#
+# ⚠️  A CORRECTION, KEPT ON PURPOSE.
+# An earlier version of this comment claimed Alpine was the CAUSE of an
+# `npm error Invalid Version:` failure, because the lockfile had complete
+# entries for linux-x64-gnu and empty ones for linux-x64-musl. That pattern
+# was real and the conclusion was wrong: Debian failed identically, and so
+# did plain `npm install`.
+#
+# The actual cause was a MALFORMED LOCKFILE. npm on Windows had written 62
+# entries with no `version` field at all, across every platform. npm parses
+# the whole lockfile before resolving anything, so entries for platforms the
+# build will never touch still abort it. Regenerating package-lock.json on
+# Linux produced a file with zero such entries and the build succeeded.
+#
+# The lesson worth keeping: when a build fails on one base image, confirm it
+# SUCCEEDS on another before concluding the base image is responsible.
 # ══════════════════════════════════════════════════════════════
 
 # ── Stage 1: dependencies ─────────────────────────────────────
-FROM node:20-alpine AS deps
+FROM node:20-slim AS deps
 WORKDIR /app
 
 # ⚠️  `npm ci`, NOT `npm install`.
@@ -30,7 +55,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci
 
 # ── Stage 2: build ────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:20-slim AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -39,7 +64,7 @@ COPY . .
 # Anything prefixed NEXT_PUBLIC_ is substituted into the client bundle during
 # `next build`. Setting NEXT_PUBLIC_API_URL in the container's environment
 # afterwards does nothing — the string is already compiled into the
-# JavaScript the browser downloads. It has to be a build arg.
+# JavaScript the browser downloads.
 #
 # The consequence: pointing this at a different API means REBUILDING, not
 # restarting. That surprises people, so it is written here rather than
@@ -51,7 +76,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # ── Stage 3: runtime ──────────────────────────────────────────
-FROM node:20-alpine AS runner
+FROM node:20-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
@@ -61,10 +86,14 @@ ENV HOSTNAME=0.0.0.0
 
 # ⚠️  NOT ROOT.
 # The default node image runs as root, so a remote-code-execution bug in any
-# dependency would execute as root inside the container. The node image ships
-# an unprivileged `node` user; using it costs nothing and removes a whole
-# escalation step.
-RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+# dependency would execute as root inside the container. Creating an
+# unprivileged user costs nothing and removes a whole escalation step.
+#
+# NOTE: groupadd/useradd, not Alpine's addgroup/adduser — different base,
+# different tools. Swapping the base image without changing these produces a
+# build that fails only in the final stage, after everything expensive.
+RUN groupadd --system --gid 1001 nodejs \
+ && useradd --system --uid 1001 --gid nodejs nextjs
 
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./

@@ -243,6 +243,18 @@ export default function LoginPage() {
               {signup ? "Sign in" : "Create one"}
             </button>
           </p>
+
+          {/* ⚠️  THIS LINE EARNS ITS SPACE ON A PUBLIC DEPLOYMENT.
+              It was removed when this was a private tool, which was right:
+              nobody needs telling what they already know about their own
+              instance. Reachable from the internet and labelled "radiology
+              decision support", it is the difference between a portfolio
+              project and something that reads as a clinical service — and
+              the only warning a stranger sees before they upload a file. */}
+          <p className="auth-note">
+            Demonstration system. For anonymised and synthetic data only —
+            do not upload real patient information.
+          </p>
         </form>
       </div>
     </div>

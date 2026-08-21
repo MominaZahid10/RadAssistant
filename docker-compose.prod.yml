@@ -1,0 +1,172 @@
+# ══════════════════════════════════════════════════════════════
+# RadAssistant — PRODUCTION stack
+# ══════════════════════════════════════════════════════════════
+# Run with:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# This is a SEPARATE FILE rather than an override layer, deliberately. An
+# override merges with the dev file, and merge semantics for lists are
+# additive — `volumes:` entries accumulate rather than replace. The dev
+# file bind-mounts ./backend over /app and ./frontend/src over /app/src; an
+# override cannot remove those, so a "production" stack would still be
+# serving the host's source tree. A distinct file cannot inherit that
+# mistake.
+#
+# ── HOW THIS DIFFERS FROM THE DEV STACK, AND WHY ──────────────
+#   1. No source bind mounts. The image is the artifact.
+#   2. Databases are NOT published to the host. See the ports note below.
+#   3. Frontend is built, not `next dev`.
+#   4. DEBUG=false, SQL_ECHO=false.
+#   5. Secrets come from the environment, not hard-coded strings.
+#   6. Only the frontend and backend ports are exposed, and both are meant
+#      to sit behind a reverse proxy that terminates TLS.
+# ══════════════════════════════════════════════════════════════
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: radassist-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:?set POSTGRES_USER in .env}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=${POSTGRES_DB:-radassist_db}
+    # ⚠️  NO `ports:` BLOCK, AND THAT IS THE POINT.
+    # The dev file publishes 5433:5432 so you can attach a client from the
+    # host. On a public VPS, publishing a database port binds it to
+    # 0.0.0.0 — Docker writes its own iptables rules, which means a
+    # host firewall (ufw) that looks correctly configured does NOT block it.
+    # Postgres becomes reachable from the internet with only its password in
+    # the way. Containers on this network reach it by hostname regardless;
+    # publishing buys nothing here and costs the whole database.
+    #
+    # To inspect it: docker compose -f docker-compose.prod.yml exec postgres psql -U "$POSTGRES_USER" radassist_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.10.1
+    container_name: radassist-qdrant
+    restart: unless-stopped
+    # Also unpublished. Qdrant ships with NO AUTHENTICATION by default — an
+    # exposed 6333 is an open door to read, and delete, every vector in the
+    # knowledge base.
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # The image has no curl or wget; bash's /dev/tcp is what is available.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: radassist-backend
+    restart: unless-stopped
+    command: sh /app/start.sh
+    # Bound to loopback only. The reverse proxy in front reaches it on the
+    # host; the internet does not reach it directly, so there is no path that
+    # skips TLS.
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-radassist_db}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+
+      # ⚠️  DEBUG=false IS NOT COSMETIC.
+      # FastAPI's debug mode returns tracebacks in HTTP responses. A traceback
+      # names file paths, library versions and sometimes the values that
+      # caused the error — a free reconnaissance report for anyone who can
+      # trigger a 500.
+      - DEBUG=false
+      # Logs every statement in full, including report text inside INSERTs —
+      # dictated findings written to the container log.
+      - SQL_ECHO=false
+
+      # ⚠️  REGISTRATION OFF. The single most important line for a public
+      # instance. With it on, anyone who finds the URL creates an account and
+      # spends your model budget. Create accounts with:
+      #   docker compose -f docker-compose.prod.yml exec backend python scripts/create_user.py
+      - ALLOW_REGISTRATION=false
+
+      # Daily spend ceilings. See backend/.env.example — and set a hard cap
+      # on the provider's dashboard as well, because these counters live in
+      # this process and a restart clears them.
+      - CHAT_DAILY_PER_USER=${CHAT_DAILY_PER_USER:-200}
+      - CHAT_DAILY_PER_INSTANCE=${CHAT_DAILY_PER_INSTANCE:-1000}
+
+      - UPLOAD_DIR=/app/uploads
+      - IMAGE_DIR=/app/images
+      - PYTHONUNBUFFERED=1
+
+      # Load the embedding and reranker models from cache rather than
+      # checking HuggingFace on every start. See the dev compose file for the
+      # full reasoning; on a server with no interactive operator, a minute of
+      # stalling on an unreachable HF looks exactly like a hung deploy.
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+      - TRANSFORMERS_OFFLINE=${HF_HUB_OFFLINE:-1}
+      - HF_HUB_DOWNLOAD_TIMEOUT=60
+      - HF_HUB_ETAG_TIMEOUT=30
+
+      - RERANK_ENABLED=${RERANK_ENABLED:-true}
+      - RERANK_CANDIDATES=${RERANK_CANDIDATES:-48}
+      - RETRIEVAL_LIMIT=${RETRIEVAL_LIMIT:-12}
+      - MAX_CHUNKS_PER_DOCUMENT=${MAX_CHUNKS_PER_DOCUMENT:-3}
+      - VISION_ENABLED=${VISION_ENABLED:-true}
+      - VISION_MODEL=${VISION_MODEL:-qwen/qwen3.6-27b}
+    volumes:
+      # ⚠️  NO `./backend:/app`. The dev file mounts the source over the
+      # image so edits take effect without rebuilding. In production that
+      # means the running code is whatever is on the host's disk, and the
+      # image you built and tested is irrelevant.
+      - uploads_data:/app/uploads
+      - images_data:/app/images
+      # The model cache stays a host bind mount so `down -v` cannot delete
+      # it — with HF_HUB_OFFLINE=1 that combination is unrecoverable without
+      # a manual re-download.
+      - ./backend/.hf_cache:/root/.cache/huggingface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        # ⚠️  BUILD ARG, NOT A RUNTIME ENVIRONMENT VARIABLE.
+        # NEXT_PUBLIC_* is compiled into the browser bundle by `next build`.
+        # Setting it in `environment:` below would have no effect at all —
+        # the value is already baked into the JavaScript the browser fetches.
+        # Change this and you must rebuild, not just restart.
+        #
+        # This is the PUBLIC address of the API as a BROWSER sees it — your
+        # domain, not an internal Docker hostname. `http://backend:8000`
+        # resolves inside the network and nowhere else; a browser given that
+        # URL fails every request.
+        - NEXT_PUBLIC_API_URL=${PUBLIC_API_URL:?set PUBLIC_API_URL, e.g. https://radassistant.example.com/api}
+    container_name: radassist-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  uploads_data:
+  images_data:

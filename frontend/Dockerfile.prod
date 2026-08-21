@@ -1,0 +1,78 @@
+# ══════════════════════════════════════════════════════════════
+# RadAssistant — Frontend, PRODUCTION
+# ══════════════════════════════════════════════════════════════
+# The development Dockerfile runs `next dev` with hot reload and expects the
+# source to be bind-mounted from the host. That cannot ship: it recompiles on
+# every request, serves unminified bundles, watches the filesystem, and — the
+# part that actually matters — a server whose code is a mounted host directory
+# is a server whose code anyone with disk access can change.
+#
+# This one builds once and serves the result.
+#
+# ⚠️  MULTI-STAGE, AND THE REASON IS NOT JUST IMAGE SIZE.
+# The final stage carries no source, no devDependencies, no compiler and no
+# test tooling. That is a smaller attack surface as much as a smaller image —
+# nothing in the runtime layer can be used to build or run arbitrary code
+# that wasn't already compiled in.
+# ══════════════════════════════════════════════════════════════
+
+# ── Stage 1: dependencies ─────────────────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+# ⚠️  `npm ci`, NOT `npm install`.
+# ci installs exactly what the lockfile pins and fails if package.json and
+# the lockfile disagree. install will happily resolve a NEWER version to
+# satisfy a caret range, which means the image you tested and the image you
+# deployed can contain different code. On a build that runs weeks apart from
+# the last one, that difference is not hypothetical.
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+# ── Stage 2: build ────────────────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# ⚠️  NEXT_PUBLIC_* IS BAKED IN AT BUILD TIME, NOT READ AT RUNTIME.
+# Anything prefixed NEXT_PUBLIC_ is substituted into the client bundle during
+# `next build`. Setting NEXT_PUBLIC_API_URL in the container's environment
+# afterwards does nothing — the string is already compiled into the
+# JavaScript the browser downloads. It has to be a build arg.
+#
+# The consequence: pointing this at a different API means REBUILDING, not
+# restarting. That surprises people, so it is written here rather than
+# discovered while debugging a frontend that keeps calling localhost.
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+# ── Stage 3: runtime ──────────────────────────────────────────
+FROM node:20-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
+# ⚠️  NOT ROOT.
+# The default node image runs as root, so a remote-code-execution bug in any
+# dependency would execute as root inside the container. The node image ships
+# an unprivileged `node` user; using it costs nothing and removes a whole
+# escalation step.
+RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+EXPOSE 3000
+
+# Standalone output ships its own minimal server; `next start` is not needed
+# and would require the full next package in the runtime layer.
+CMD ["node", "server.js"]

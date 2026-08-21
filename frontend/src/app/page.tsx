@@ -1259,8 +1259,14 @@ export default function ChatPage() {
           </div>
         </div>
 
+        {/* Two separate claims, deliberately both here: what the output is
+            worth (verify it) and what the input may contain (nothing real).
+            The second sits by the composer because that is where the attach
+            button is — a warning on the sign-in page is read once and
+            forgotten by the time somebody drags a file in. */}
         <p className="composer-note">
-          Decision support only — verify before clinical use.
+          Decision support only — verify before clinical use. Upload
+          anonymised or synthetic images only.
         </p>
       </div>
 

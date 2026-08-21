@@ -1039,6 +1039,16 @@ body {
 }
 .auth-alt button:hover { text-decoration: underline; }
 
+/* The data-handling warning under the form. Quiet, but not hidden — it is
+   the only thing a stranger reads before uploading. */
+.auth-note {
+  margin-top: 34px;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--foreground-muted);
+}
+
 /* ══════════════════════════════════════════════════════════════
    Image library & viewer
    ══════════════════════════════════════════════════════════════

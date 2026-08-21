@@ -14,8 +14,6 @@
  * cost outside the tests, where it belongs.
  */
 
-import type { FullConfig } from "@playwright/test";
-
 const BASE_URL = process.env.E2E_BASE_URL ?? "http://localhost:3000";
 const API_URL = process.env.E2E_API_URL ?? "http://localhost:8000";
 
@@ -51,7 +49,7 @@ async function waitFor(
   );
 }
 
-export default async function globalSetup(_config: FullConfig) {
+export default async function globalSetup() {
   await waitFor(`${API_URL}/api/v1/health`, "The backend");
   // Compile both routes before the first assertion depends on them.
   await waitFor(`${BASE_URL}/login`, "The frontend");

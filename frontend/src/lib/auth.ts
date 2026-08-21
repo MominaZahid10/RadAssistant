@@ -92,6 +92,37 @@ export function isSignedIn(): boolean {
   return Boolean(getToken());
 }
 
+/**
+ * Subscribe to session changes, for `useSyncExternalStore`.
+ *
+ * ⚠️  WHY THIS EXISTS RATHER THAN `useEffect(() => setEmail(getStoredEmail()))`.
+ * sessionStorage cannot be read during render — the server has no such
+ * storage, so the markup it produces would disagree with the client's first
+ * paint and React would discard the tree. Reading it in an effect and calling
+ * setState fixes the mismatch but costs a second render pass on every mount
+ * and is exactly the pattern React now flags. `useSyncExternalStore` is the
+ * primitive built for this case: it takes a server snapshot (nobody is signed
+ * in) and a client snapshot (read the store), with no extra render.
+ *
+ * Returns an unsubscribe function, per the hook's contract.
+ */
+export function subscribeToSession(onChange: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(AUTH_EXPIRED_EVENT, onChange);
+  // Fired when ANOTHER tab writes to storage — a second tab signing out
+  // should not leave this one showing a stale identity.
+  window.addEventListener("storage", onChange);
+  return () => {
+    window.removeEventListener(AUTH_EXPIRED_EVENT, onChange);
+    window.removeEventListener("storage", onChange);
+  };
+}
+
+/** Server snapshot for the hook above: never signed in during SSR. */
+export function serverEmailSnapshot(): string | null {
+  return null;
+}
+
 /** Header to attach to an authenticated request. Empty when signed out. */
 export function authHeader(): Record<string, string> {
   const token = getToken();

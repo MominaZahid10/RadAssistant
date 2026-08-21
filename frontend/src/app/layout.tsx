@@ -1,27 +1,19 @@
 /**
- * RadAssist AI — Root Layout
- * 
- * This is the TOP-LEVEL wrapper for every page in the app.
- * 
- * In Next.js App Router:
- * - layout.tsx wraps ALL pages (like a picture frame)
- * - page.tsx is the actual content inside the frame
- * - {children} is where the page content gets inserted
- * 
- * WHY IS THIS IMPORTANT?
- * The sidebar, fonts, and metadata are defined ONCE here
- * and automatically apply to every page in the app.
- * You never have to import the sidebar in individual pages.
+ * RadAssistant — Root Layout
+ *
+ * The top-level wrapper for every page. Fonts and metadata are defined once
+ * here; the shell (sidebar + main column) and the conversation state live in
+ * AppShell, which is a client component because both depend on browser
+ * storage and on the current route.
  */
 
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
 import "./globals.css";
 
-// ── Font Loading ────────────────────────────────────────────
-// Next.js loads Google Fonts at BUILD time (not runtime).
-// This means: no layout shift, no extra network requests.
+// Next.js loads Google Fonts at BUILD time, not runtime: no layout shift,
+// no extra network request.
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
@@ -32,29 +24,22 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-// ── SEO Metadata ────────────────────────────────────────────
-// This sets the <title> and <meta> tags in the HTML <head>.
-// Important for search engines and browser tabs.
 export const metadata: Metadata = {
-  title: "RadAssist AI — Radiology Reporting Assistant",
+  title: "RadAssistant — Radiology Reporting Assistant",
   description:
     "An explainable, multimodal RAG platform for radiology report generation and clinical decision support.",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
   return (
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex bg-background">
-        {/* Sidebar — always visible on the left */}
-        <Sidebar />
-
-        {/* Main content area — offset by sidebar width */}
-        <main className="flex-1 ml-[260px] min-h-screen transition-all duration-300">
-          {children}
-        </main>
+      <body className="h-full">
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

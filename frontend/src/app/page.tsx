@@ -1,11 +1,15 @@
 /**
- * RadAssist AI — Chat Page (Main Interface)
+ * RadAssistant — Chat page
  *
- * Real RAG-powered chat with:
+ * RAG-powered chat with:
  * - SSE streaming (token-by-token typewriter effect)
  * - Source citations panel (collapsible evidence)
- * - Audience toggle (radiologist / resident)
+ * - Audience toggle (attending / resident)
  * - Error handling for LLM failures
+ *
+ * The transcript itself is NOT local state. It lives in AppShell so the
+ * sidebar and this page are looking at the same conversations — which is
+ * what makes "new chat" and "go back to a previous chat" work at all.
  */
 "use client";
 
@@ -13,8 +17,6 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import {
   api,
   imageApi,
-  type SSEEvent,
-  type SourceReference,
   type Audience,
   type ChatMode,
   type MedicalImage,
@@ -22,34 +24,18 @@ import {
 import { useRouter } from "next/navigation";
 import ImageViewer from "@/components/ImageViewer";
 import AuthedImage from "@/components/AuthedImage";
-import {
-  AUTH_EXPIRED_EVENT,
-  clearSession,
-  getStoredEmail,
-  isSignedIn,
-} from "@/lib/auth";
 import ReportEditor from "@/components/ReportEditor";
+import Brand from "@/components/Brand";
+import { useApp } from "@/components/AppShell";
+import type { StoredMessage } from "@/lib/chats";
+import { AUTH_EXPIRED_EVENT, isSignedIn } from "@/lib/auth";
 
-interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  /** Images the user attached to this message. */
-  images?: MedicalImage[];
-  sources?: SourceReference[];
-  model?: string;
-  isStreaming?: boolean;
-  isError?: boolean;
-  /** Which mode produced this. "report" renders as an editable document. */
-  mode?: ChatMode;
-  /**
-   * The findings this draft was generated from. Kept on the message so
-   * Regenerate does not have to guess at the input — reading it back out of
-   * the preceding user bubble would break the moment anything else is
-   * inserted between them.
-   */
-  findingsInput?: string;
-}
+/**
+ * A turn as this page renders it. Identical to the persisted shape — the
+ * transcript that reloads from storage must render the same way the live one
+ * does, so there is deliberately no second in-memory type to keep in sync.
+ */
+type Message = StoredMessage;
 
 /**
  * Splits answer text on inline [N] citations and renders each as a clickable
@@ -419,7 +405,15 @@ function SourceFigures({
 }
 
 export default function ChatPage() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const {
+    collapsed,
+    setCollapsed,
+    messages,
+    setMessages,
+    ensureConversation,
+    activeConversation,
+  } = useApp();
+
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [audience, setAudience] = useState<Audience>("radiologist");
@@ -439,7 +433,6 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
   // Lets regenerateReport call handleSend, which is defined further down.
   const sendRef = useRef<(() => void) | null>(null);
 
@@ -464,7 +457,8 @@ export default function ChatPage() {
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
   }, [router]);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to the bottom as messages arrive, and when switching
+  // conversations — reopening a chat should land at the end of it.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -474,7 +468,7 @@ export default function ChatPage() {
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
       textareaRef.current.style.height =
-        Math.min(textareaRef.current.scrollHeight, 200) + "px";
+        Math.min(textareaRef.current.scrollHeight, 180) + "px";
     }
   }, [input]);
 
@@ -539,7 +533,9 @@ export default function ChatPage() {
       setAttachError(null);
     } catch (e) {
       setAttachError(
-        e instanceof Error ? `Could not attach: ${e.message}` : "Could not attach that file."
+        e instanceof Error
+          ? `Could not attach: ${e.message}`
+          : "Could not attach that file."
       );
     }
   };
@@ -580,6 +576,21 @@ export default function ChatPage() {
     // Either text or an attachment is enough to send.
     if ((!trimmed && attachments.length === 0) || isLoading) return;
 
+    // ⚠️  BEFORE THE FIRST setMessages, AND CAPTURED.
+    // Two things depend on this. On a fresh install there is no conversation
+    // yet, so one has to exist before any write lands. And every write below
+    // is pinned to THIS id rather than to whatever is active when it fires —
+    // a send outlives the click that started it, and the user is free to open
+    // another conversation while the answer is still streaming. Writing to
+    // "the active chat" would drop those tokens on the floor.
+    const convId = ensureConversation();
+
+    // Bound once rather than passing convId to each of the writes below —
+    // eight call sites that must not disagree about their destination is
+    // eight chances to miss one.
+    const write = (update: Parameters<typeof setMessages>[0]): void =>
+      setMessages(update, convId);
+
     const userMsgId = Date.now().toString();
     const userMsg: Message = {
       id: userMsgId,
@@ -599,7 +610,7 @@ export default function ChatPage() {
       findingsInput: trimmed,
     };
 
-    setMessages((prev) => [...prev, userMsg, aiMsg]);
+    write((prev) => [...prev, userMsg, aiMsg]);
     setInput("");
     setPending([]);
     setIsLoading(true);
@@ -614,7 +625,7 @@ export default function ChatPage() {
     let priorText = "";
 
     if (attachments.length) {
-      setMessages((prev) =>
+      write((prev) =>
         prev.map((m) =>
           m.id === aiMsgId
             ? { ...m, content: `Reading ${attachments.length} attachment(s)…` }
@@ -639,10 +650,8 @@ export default function ChatPage() {
         }
       }
 
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === userMsgId ? { ...m, images: uploaded } : m
-        )
+      write((prev) =>
+        prev.map((m) => (m.id === userMsgId ? { ...m, images: uploaded } : m))
       );
 
       // ⚠️  SENT SEPARATELY, NOT CONCATENATED INTO THE QUESTION.
@@ -680,7 +689,7 @@ export default function ChatPage() {
       }
 
       // Clear the placeholder before streaming begins.
-      setMessages((prev) =>
+      write((prev) =>
         prev.map((m) => (m.id === aiMsgId ? { ...m, content: "" } : m))
       );
     }
@@ -698,18 +707,16 @@ export default function ChatPage() {
         switch (event.type) {
           case "sources":
             // Sources arrive first — attach them to the AI message
-            setMessages((prev) =>
+            write((prev) =>
               prev.map((msg) =>
-                msg.id === aiMsgId
-                  ? { ...msg, sources: event.sources }
-                  : msg
+                msg.id === aiMsgId ? { ...msg, sources: event.sources } : msg
               )
             );
             break;
 
           case "token":
             // Append each token to the AI message content
-            setMessages((prev) =>
+            write((prev) =>
               prev.map((msg) =>
                 msg.id === aiMsgId
                   ? { ...msg, content: msg.content + event.token }
@@ -720,7 +727,7 @@ export default function ChatPage() {
 
           case "done":
             // Mark streaming as complete, record the model used
-            setMessages((prev) =>
+            write((prev) =>
               prev.map((msg) =>
                 msg.id === aiMsgId
                   ? { ...msg, isStreaming: false, model: event.model }
@@ -731,12 +738,12 @@ export default function ChatPage() {
 
           case "error":
             // Show the error in the AI message
-            setMessages((prev) =>
+            write((prev) =>
               prev.map((msg) =>
                 msg.id === aiMsgId
                   ? {
                       ...msg,
-                      content: `⚠️ ${event.error}`,
+                      content: event.error,
                       isStreaming: false,
                       isError: true,
                     }
@@ -750,12 +757,12 @@ export default function ChatPage() {
       // Network error or failed to connect
       const errorMessage =
         err instanceof Error ? err.message : "Failed to connect to the server";
-      setMessages((prev) =>
+      write((prev) =>
         prev.map((msg) =>
           msg.id === aiMsgId
             ? {
                 ...msg,
-                content: `⚠️ ${errorMessage}`,
+                content: errorMessage,
                 isStreaming: false,
                 isError: true,
               }
@@ -784,268 +791,306 @@ export default function ChatPage() {
   if (signedIn === null) return null;
   if (!signedIn) return null;
 
+  const canSend = (input.trim().length > 0 || pending.length > 0) && !isLoading;
+  const isEmpty = messages.length === 0;
+
   return (
-    <div className="flex flex-col h-screen">
-      {/* Who is signed in, and a way out. Without this there is no route back
-          to the login screen short of clearing storage by hand — and on a
-          shared workstation "sign out" is what stops the next person's
-          approvals being attributed to you. */}
-      <div className="flex justify-end px-4 pt-2">
-        <div className="session-bar">
-          <span>{getStoredEmail()}</span>
+    <>
+      {/* ── Top bar ──
+          The Ask/Draft/Compare control lives up here rather than inside the
+          composer. It selects what the assistant PRODUCES, which is a
+          property of the conversation, not of the message being typed —
+          and moving it out is most of what un-crowded the composer. */}
+      <header className="topbar">
+        {collapsed && (
           <button
-            onClick={() => {
-              // notify=false: we navigate deliberately here, so the
-              // "session expired" listener must not also fire.
-              clearSession(false);
-              router.replace("/login");
-            }}
+            className="topbar-expand"
+            onClick={() => setCollapsed(false)}
+            title="Open sidebar"
+            aria-label="Open sidebar"
           >
-            Sign out
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            >
+              <rect x="3" y="4" width="18" height="16" rx="2.5" />
+              <path d="M9.5 4v16" />
+            </svg>
+          </button>
+        )}
+
+        <h1 className="topbar-title">
+          {activeConversation && !isEmpty ? activeConversation.title : "New chat"}
+        </h1>
+
+        <div className="segmented">
+          <button
+            className={mode === "qa" ? "active" : ""}
+            onClick={() => setMode("qa")}
+            title="Answer a question from the knowledge base"
+          >
+            Ask
+          </button>
+          <button
+            className={mode === "report" ? "active" : ""}
+            onClick={() => setMode("report")}
+            title="Draft a structured report from dictated findings"
+          >
+            Draft
+          </button>
+          <button
+            className={mode === "comparison" ? "active" : ""}
+            onClick={() => setMode("comparison")}
+            title="Attach the prior study, dictate the current findings"
+          >
+            Compare
           </button>
         </div>
-      </div>
+      </header>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto">
-        {messages.length === 0 ? (
-          /* Welcome Screen */
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center max-w-lg px-4">
-              <div className="text-6xl mb-5">🩻</div>
-              <h1 className="text-2xl font-semibold text-gradient mb-3">
-                RadAssist AI
-              </h1>
-              <p className="text-foreground-secondary text-sm leading-relaxed mb-8">
-                Your radiology decision-support assistant. Ask about findings,
-                search the knowledge base, or get structured report suggestions
-                — every answer is grounded in evidence with traceable sources.
-              </p>
+      {/* ── Thread ── */}
+      <div className="thread">
+        {isEmpty ? (
+          <div className="welcome">
+            <Brand size={52} className="welcome-mark" />
+            <h2>How can I help?</h2>
+            <p>Ask a question, draft a report, or compare against a prior study.</p>
 
-              {/* Example prompts */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-md mx-auto">
-                {[
-                  "What are the radiographic findings of pneumothorax?",
-                  "Explain the Fleischner criteria for pulmonary nodules",
-                  "CTPA findings for pulmonary embolism",
-                  "Describe the ABCDE approach to chest X-ray",
-                ].map((prompt, i) => (
-                  <button
-                    key={i}
-                    onClick={() => {
-                      setInput(prompt);
-                      textareaRef.current?.focus();
-                    }}
-                    className="text-left px-4 py-3 rounded-xl border border-border text-xs text-foreground-secondary hover:text-foreground hover:bg-surface-hover hover:border-border-hover transition-all duration-200"
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
+            <div className="welcome-prompts">
+              {[
+                "Radiographic findings of pneumothorax",
+                "Fleischner criteria for pulmonary nodules",
+                "CTPA findings for pulmonary embolism",
+                "ABCDE approach to chest X-ray",
+              ].map((prompt) => (
+                <button
+                  key={prompt}
+                  onClick={() => {
+                    setInput(prompt);
+                    textareaRef.current?.focus();
+                  }}
+                >
+                  {prompt}
+                </button>
+              ))}
             </div>
           </div>
         ) : (
-          /* Message List */
-          <div className="max-w-3xl mx-auto py-6 px-4 space-y-6">
-            {messages.map((msg) => (
-              <div key={msg.id} className="flex gap-3">
-                {/* Avatar */}
-                <div
-                  className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 text-xs mt-0.5 ${
-                    msg.role === "user"
-                      ? "bg-accent/20 text-accent"
-                      : "bg-surface text-foreground-secondary"
-                  }`}
-                >
-                  {msg.role === "user" ? "Y" : "🩻"}
-                </div>
+          <div className="thread-inner">
+            {messages.map((msg) =>
+              msg.role === "user" ? (
+                /* ── The user's own turn: filled, right-aligned ──
+                   No "You" caption. Alignment and fill already say who is
+                   speaking; the label was a third piece of furniture
+                   repeating what the shape communicates. */
+                <div key={msg.id} className="msg-row msg-row--user">
+                  <div style={{ maxWidth: "78%" }}>
+                    {msg.content && (
+                      <div className="bubble-user">{msg.content}</div>
+                    )}
 
-                {/* Message Content */}
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-foreground-muted mb-1">
-                    {msg.role === "user" ? "You" : "RadAssist AI"}
-                    {msg.model && (
-                      <span className="ml-2 text-foreground-muted/60 font-normal">
-                        via {msg.model}
-                      </span>
-                    )}
-                  </p>
-                  <div
-                    className={`text-sm leading-relaxed ${
-                      msg.role === "user" ? "whitespace-pre-wrap" : ""
-                    } ${msg.isError ? "text-error" : "text-foreground"}`}
-                  >
-                    {/* A finished report draft becomes an editable, signable
-                        document rather than a chat bubble. Still streaming, it
-                        renders as text — an editor whose contents rewrite
-                        themselves mid-keystroke is not usable. */}
-                    {msg.mode === "report" &&
-                    !msg.isStreaming &&
-                    !msg.isError &&
-                    msg.content.trim() ? (
-                      <ReportEditor
-                        draft={msg.content}
-                        findingsInput={msg.findingsInput ?? ""}
-                        model={msg.model}
-                        sources={
-                          msg.sources as unknown as Record<string, unknown>[]
-                        }
-                        onRegenerate={() =>
-                          regenerateReport(msg.findingsInput ?? "")
-                        }
-                      />
-                    ) : (
-                    <MarkdownAnswer
-                      text={msg.content}
-                      sourceCount={msg.sources?.length ?? 0}
-                      onCitationClick={(n) => {
-                        // Make sure the panel is open, then scroll to the source.
-                        setExpandedSources((prev) => {
-                          const next = new Set(prev);
-                          next.add(msg.id);
-                          return next;
-                        });
-                        // Wait a frame so the panel exists in the DOM.
-                        requestAnimationFrame(() => {
-                          const el = document.getElementById(
-                            `source-${msg.id}-${n}`
-                          );
-                          el?.scrollIntoView({ behavior: "smooth", block: "center" });
-                          el?.classList.add("source-card--flash");
-                          setTimeout(
-                            () => el?.classList.remove("source-card--flash"),
-                            1200
-                          );
-                        });
-                      }}
-                    />
-                    )}
-                    {msg.isStreaming && (
-                      <span className="inline-block w-2 h-4 bg-accent/70 ml-0.5 animate-pulse rounded-sm" />
+                    {msg.images && msg.images.length > 0 && (
+                      <div className="msg-attachments" style={{ justifyContent: "flex-end" }}>
+                        {msg.images.map((img) => (
+                          <button
+                            key={img.id}
+                            className="msg-attachment"
+                            onClick={() => setViewing(img)}
+                            title={
+                              img.ocr_text
+                                ? `${img.filename} — ${img.ocr_text.length} chars of text extracted`
+                                : img.filename
+                            }
+                          >
+                            {img.thumbnail_url ? (
+                              <AuthedImage
+                                path={img.thumbnail_url}
+                                alt={img.filename}
+                              />
+                            ) : (
+                              <span className="msg-attachment-fallback">🩻</span>
+                            )}
+                            {img.ocr_text && (
+                              <span
+                                className="msg-attachment-ocr"
+                                title="Text was extracted and included in the question"
+                              >
+                                T
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
                     )}
                   </div>
+                </div>
+              ) : (
+                /* ── The assistant's turn ── */
+                <div key={msg.id} className="msg-assistant">
+                  <div className="assistant-mark">
+                    <Brand size={17} />
+                  </div>
 
-                  {/* Attached images — click to open the full viewer */}
-                  {msg.images && msg.images.length > 0 && (
-                    <div className="msg-attachments">
-                      {msg.images.map((img) => (
-                        <button
-                          key={img.id}
-                          className="msg-attachment"
-                          onClick={() => setViewing(img)}
-                          title={
-                            img.ocr_text
-                              ? `${img.filename} — ${img.ocr_text.length} chars of text extracted`
-                              : img.filename
+                  <div className="assistant-body">
+                    {/* A finished report draft becomes an editable, signable
+                        document rather than a chat bubble — so it supplies
+                        its own frame and the bubble goes bare. Still
+                        streaming, it renders as text: an editor whose
+                        contents rewrite themselves mid-keystroke is not
+                        usable. */}
+                    <div
+                      className={`bubble-assistant${
+                        msg.isError ? " bubble-assistant--error" : ""
+                      }${
+                        msg.mode === "report" && !msg.isStreaming && !msg.isError
+                          ? " bubble-assistant--bare"
+                          : ""
+                      }`}
+                    >
+                      {msg.mode === "report" &&
+                      !msg.isStreaming &&
+                      !msg.isError &&
+                      msg.content.trim() ? (
+                        <ReportEditor
+                          draft={msg.content}
+                          findingsInput={msg.findingsInput ?? ""}
+                          model={msg.model}
+                          sources={
+                            msg.sources as unknown as Record<string, unknown>[]
                           }
-                        >
-                          {img.thumbnail_url ? (
-                            <AuthedImage
-                              path={img.thumbnail_url}
-                              alt={img.filename}
-                            />
-                          ) : (
-                            <span className="msg-attachment-fallback">🩻</span>
-                          )}
-                          {img.ocr_text && (
-                            <span
-                              className="msg-attachment-ocr"
-                              title="Text was extracted and included in the question"
+                          onRegenerate={() =>
+                            regenerateReport(msg.findingsInput ?? "")
+                          }
+                        />
+                      ) : (
+                        <MarkdownAnswer
+                          text={msg.content}
+                          sourceCount={msg.sources?.length ?? 0}
+                          onCitationClick={(n) => {
+                            // Make sure the panel is open, then scroll to it.
+                            setExpandedSources((prev) => {
+                              const next = new Set(prev);
+                              next.add(msg.id);
+                              return next;
+                            });
+                            // Wait a frame so the panel exists in the DOM.
+                            requestAnimationFrame(() => {
+                              const el = document.getElementById(
+                                `source-${msg.id}-${n}`
+                              );
+                              el?.scrollIntoView({
+                                behavior: "smooth",
+                                block: "center",
+                              });
+                              el?.classList.add("source-card--flash");
+                              setTimeout(
+                                () => el?.classList.remove("source-card--flash"),
+                                1200
+                              );
+                            });
+                          }}
+                        />
+                      )}
+
+                      {msg.isStreaming && <span className="stream-caret" />}
+
+                      {/* Sources sit inside the answer card: the evidence
+                          belongs to the claim, not beside it. */}
+                      {msg.sources && msg.sources.length > 0 && !msg.isStreaming && (
+                        <>
+                          <button
+                            onClick={() => toggleSources(msg.id)}
+                            className="sources-toggle"
+                          >
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 12 12"
+                              fill="none"
+                              className={`transition-transform duration-200 ${
+                                expandedSources.has(msg.id) ? "rotate-90" : ""
+                              }`}
                             >
-                              T
-                            </span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Source Citations */}
-                  {msg.sources && msg.sources.length > 0 && !msg.isStreaming && (
-                    <div className="mt-3">
-                      <button
-                        onClick={() => toggleSources(msg.id)}
-                        className="sources-toggle"
-                      >
-                        <svg
-                          width="12"
-                          height="12"
-                          viewBox="0 0 12 12"
-                          fill="none"
-                          className={`transition-transform duration-200 ${
-                            expandedSources.has(msg.id) ? "rotate-90" : ""
-                          }`}
-                        >
-                          <path
-                            d="M4.5 2.5L8 6L4.5 9.5"
-                            stroke="currentColor"
-                            strokeWidth="1.5"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        </svg>
-                        <span>
-                          {msg.sources.length} source{msg.sources.length !== 1 ? "s" : ""}
-                        </span>
-                      </button>
-
-                      {expandedSources.has(msg.id) && (
-                        <div className="sources-panel">
-                          {msg.sources.map((src) => (
-                            <div
-                              key={src.chunk_id}
-                              id={`source-${msg.id}-${src.chunk_id}`}
-                              className="source-card"
-                            >
-                              <div className="source-header">
-                                <span className="source-badge">
-                                  [{src.chunk_id}]
-                                </span>
-                                <span className="source-title">
-                                  {src.document_title || "Unknown source"}
-                                </span>
-                                <span className="source-score">
-                                  {(src.score * 100).toFixed(0)}% match
-                                </span>
-                              </div>
-                              {src.source_type && (
-                                <span className="source-type">
-                                  {src.source_type}
-                                </span>
-                              )}
-                              <p className="source-text">{src.text}</p>
-
-                              <SourceFigures
-                                documentId={src.document_id ?? null}
-                                onView={setViewing}
+                              <path
+                                d="M4.5 2.5L8 6L4.5 9.5"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
                               />
+                            </svg>
+                            <span>
+                              {msg.sources.length} source
+                              {msg.sources.length !== 1 ? "s" : ""}
+                            </span>
+                          </button>
+
+                          {expandedSources.has(msg.id) && (
+                            <div className="sources-panel">
+                              {msg.sources.map((src) => (
+                                <div
+                                  key={src.chunk_id}
+                                  id={`source-${msg.id}-${src.chunk_id}`}
+                                  className="source-card"
+                                >
+                                  <div className="source-header">
+                                    <span className="source-badge">
+                                      [{src.chunk_id}]
+                                    </span>
+                                    <span className="source-title">
+                                      {src.document_title || "Unknown source"}
+                                    </span>
+                                    <span className="source-score">
+                                      {(src.score * 100).toFixed(0)}%
+                                    </span>
+                                  </div>
+                                  {src.source_type && (
+                                    <span className="source-type">
+                                      {src.source_type}
+                                    </span>
+                                  )}
+                                  <p className="source-text">{src.text}</p>
+
+                                  <SourceFigures
+                                    documentId={src.document_id ?? null}
+                                    onView={setViewing}
+                                  />
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
+                          )}
+                        </>
                       )}
                     </div>
-                  )}
-                </div>
-              </div>
-            ))}
 
-            {/* Typing Indicator (only when waiting for first token) */}
+                    {msg.model && !msg.isStreaming && (
+                      <p className="msg-meta">via {msg.model}</p>
+                    )}
+                  </div>
+                </div>
+              )
+            )}
+
+            {/* Waiting for the first token */}
             {isLoading &&
               messages.length > 0 &&
               messages[messages.length - 1].role === "assistant" &&
               messages[messages.length - 1].content === "" &&
               !messages[messages.length - 1].isError && (
-                <div className="flex gap-3 -mt-4">
-                  <div className="w-7 h-7" /> {/* spacer to align with avatar */}
-                  <div className="pt-0">
-                    <div className="flex gap-1 items-center text-xs text-foreground-muted">
-                      <div className="flex gap-1 mr-2">
-                        <span className="w-1.5 h-1.5 bg-foreground-muted rounded-full dot-1" />
-                        <span className="w-1.5 h-1.5 bg-foreground-muted rounded-full dot-2" />
-                        <span className="w-1.5 h-1.5 bg-foreground-muted rounded-full dot-3" />
-                      </div>
-                      Searching knowledge base...
-                    </div>
+                <div className="msg-assistant" style={{ marginTop: -14 }}>
+                  <div style={{ width: 30, flexShrink: 0 }} />
+                  <div className="flex gap-1 items-center text-xs text-foreground-muted">
+                    <span className="flex gap-1 mr-2">
+                      <span className="w-1.5 h-1.5 bg-foreground-muted rounded-full dot-1" />
+                      <span className="w-1.5 h-1.5 bg-foreground-muted rounded-full dot-2" />
+                      <span className="w-1.5 h-1.5 bg-foreground-muted rounded-full dot-3" />
+                    </span>
+                    Searching the knowledge base…
                   </div>
                 </div>
               )}
@@ -1055,47 +1100,64 @@ export default function ChatPage() {
         )}
       </div>
 
-      {/* Input Area — pinned to bottom */}
-      <div className="border-t border-border bg-background-secondary p-4">
-        <div className="max-w-3xl mx-auto">
-          {/* Staged attachments — shown above the input, like ChatGPT */}
-          {pending.length > 0 && (
-            <div className="attach-tray">
-              {pending.map((att) => (
-                <div key={att.key} className="attach-chip">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={att.previewUrl} alt={att.file.name} />
-                  <button
-                    onClick={() => removePending(att.key)}
-                    className="attach-remove"
-                    aria-label={`Remove ${att.file.name}`}
-                  >
-                    ✕
-                  </button>
-                  <span className="attach-name">{att.file.name}</span>
-                </div>
-              ))}
-            </div>
-          )}
+      {/* ── Composer ── */}
+      <div className="composer-wrap">
+        {/* Staged attachments, above the input */}
+        {pending.length > 0 && (
+          <div className="attach-tray">
+            {pending.map((att) => (
+              <div key={att.key} className="attach-chip">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={att.previewUrl} alt={att.file.name} />
+                <button
+                  onClick={() => removePending(att.key)}
+                  className="attach-remove"
+                  aria-label={`Remove ${att.file.name}`}
+                >
+                  ✕
+                </button>
+                <span className="attach-name">{att.file.name}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
-          {attachError && (
-            <p className="attach-error">
-              {attachError}{" "}
-              <button onClick={() => setAttachError(null)}>dismiss</button>
-            </p>
-          )}
+        {attachError && (
+          <p className="attach-error">
+            {attachError}{" "}
+            <button onClick={() => setAttachError(null)}>dismiss</button>
+          </p>
+        )}
 
-          <div
-            className={`flex items-end gap-2 bg-surface rounded-xl border focus-within:border-accent/50 transition-colors px-4 py-3 ${
-              dragging ? "border-accent" : "border-border"
-            }`}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragging(true);
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={handleDrop}
-          >
+        <div
+          className="composer"
+          data-dragging={dragging}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={handleDrop}
+        >
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            placeholder={
+              pending.length
+                ? "Ask about the attached file, or just send…"
+                : mode === "report"
+                ? "Dictate findings — e.g. Mild cardiomegaly. No pleural effusion."
+                : mode === "comparison"
+                ? "Attach the prior study, then dictate the current findings…"
+                : "Ask a radiology question…"
+            }
+            rows={1}
+          />
+
+          <div className="composer-bar">
             {/* Attach — DICOM, report photos, any image */}
             <input
               ref={fileInputRef}
@@ -1136,131 +1198,76 @@ export default function ChatPage() {
               title="Attach an image, report photo, or DICOM file"
               aria-label="Attach a file"
             >
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none"
-                   stroke="currentColor" strokeWidth="2"
-                   strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="17"
+                height="17"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
               </svg>
             </button>
 
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={
-                pending.length
-                  ? "Ask about the attached file, or just send…"
-                  : mode === "report"
-                  ? "Dictate findings — e.g. Mild cardiomegaly. No pleural effusion. Clear lung fields."
-                  : mode === "comparison"
-                  ? "Attach the PRIOR study, then dictate the CURRENT findings here…"
-                  : "Ask a radiology question..."
+            {/* Register. Only meaningful when answering a question — a report
+                goes into a medical record, and its register is fixed by
+                reporting convention rather than by who is reading it. One
+                button that toggles, rather than a two-option segmented
+                control, because it is a binary the user rarely touches. */}
+            <button
+              className="composer-pill"
+              disabled={mode === "report"}
+              onClick={() =>
+                setAudience((a) =>
+                  a === "radiologist" ? "resident" : "radiologist"
+                )
               }
-              rows={1}
-              className="flex-1 bg-transparent text-sm text-foreground placeholder:text-foreground-muted resize-none outline-none max-h-[200px]"
-            />
-
-            {/* Mode Toggle - what to produce, not who for */}
-            <div className="audience-toggle flex-shrink-0">
-              <button
-                onClick={() => setMode("qa")}
-                className={`audience-option ${mode === "qa" ? "active" : ""}`}
-                title="Answer a question from the knowledge base"
-              >
-                Ask
-              </button>
-              <button
-                onClick={() => setMode("report")}
-                className={`audience-option ${
-                  mode === "report" ? "active" : ""
-                }`}
-                title="Draft a structured report from dictated findings"
-              >
-                Draft
-              </button>
-              <button
-                onClick={() => setMode("comparison")}
-                className={`audience-option ${
-                  mode === "comparison" ? "active" : ""
-                }`}
-                title="Attach the prior study, dictate the current findings"
-              >
-                Compare
-              </button>
-            </div>
-
-            {/* Audience Toggle - only meaningful when answering a question.
-                A report goes into a medical record; its register is fixed by
-                reporting convention, not by who is reading it. */}
-            <div
-              className="audience-toggle flex-shrink-0"
-              style={{
-                opacity: mode === "report" ? 0.35 : 1,
-                pointerEvents: mode === "report" ? "none" : "auto",
-              }}
               title={
                 mode === "report"
                   ? "Not applicable when drafting a report"
-                  : undefined
+                  : audience === "radiologist"
+                  ? "Concise, standard terminology. Click for step-by-step."
+                  : "Step-by-step reasoning, defines terms. Click for concise."
               }
             >
-              <button
-                onClick={() => setAudience("radiologist")}
-                className={`audience-option ${
-                  audience === "radiologist" ? "active" : ""
-                }`}
-                title="Concise responses with standard terminology"
-              >
-                Attending
-              </button>
-              <button
-                onClick={() => setAudience("resident")}
-                className={`audience-option ${
-                  audience === "resident" ? "active" : ""
-                }`}
-                title="Step-by-step reasoning, defines terms"
-              >
-                Resident
-              </button>
-            </div>
+              {audience === "radiologist" ? "Attending" : "Resident"}
+            </button>
 
-            {/* Send Button */}
             <button
               onClick={handleSend}
-              disabled={(!input.trim() && pending.length === 0) || isLoading}
-              className={`p-2 rounded-lg transition-colors flex-shrink-0 ${
-                (input.trim() || pending.length > 0) && !isLoading
-                  ? "bg-accent text-white hover:bg-accent-hover"
-                  : "text-foreground-muted cursor-not-allowed"
-              }`}
+              disabled={!canSend}
+              className="composer-send"
+              title="Send"
+              aria-label="Send message"
             >
               <svg
-                width="16"
-                height="16"
-                viewBox="0 0 16 16"
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
                 fill="none"
-                className="rotate-90"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
               >
-                <path
-                  d="M2 8L14 2L8 14L7 9L2 8Z"
-                  fill="currentColor"
-                />
+                <path d="M12 19V5M5 12l7-7 7 7" />
               </svg>
             </button>
           </div>
-          <p className="text-[10px] text-foreground-muted text-center mt-2">
-            RadAssist AI is a decision-support tool. Always verify AI
-            suggestions before clinical use.
-          </p>
         </div>
+
+        <p className="composer-note">
+          Decision support only — verify before clinical use.
+        </p>
       </div>
 
       {/* Full-screen viewer for an attached image */}
       {viewing && (
         <ImageViewer image={viewing} onClose={() => setViewing(null)} />
       )}
-    </div>
+    </>
   );
 }

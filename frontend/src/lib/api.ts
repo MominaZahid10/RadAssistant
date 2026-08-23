@@ -26,8 +26,26 @@ import {
   type LoginResult,
 } from "@/lib/auth";
 
-// Backend URL — reads from .env.local, falls back to Docker default
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Backend URL — reads from .env.local, falls back to the Docker default.
+//
+// ⚠️  THE "same-origin" SENTINEL EXISTS BECAUSE THIS VALUE IS BAKED IN.
+// NEXT_PUBLIC_* is substituted into the browser bundle by `next build`, so a
+// deployment whose public hostname changes would normally need a REBUILD for
+// every new hostname. Behind a reverse proxy that serves the app and the API
+// from one origin (Caddyfile.selfhosted), the base can simply be empty and
+// every request becomes origin-relative — `/api/v1/chat` resolves against
+// whatever hostname the browser already loaded the page from.
+//
+// That is what makes a rotating tunnel hostname workable: the URL can change
+// on every restart and the compiled bundle stays correct.
+//
+// An empty string cannot be used directly as the env value, because `""` is
+// falsy and would silently fall through to localhost:8000 — the exact bug
+// this sentinel avoids.
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL === "same-origin"
+    ? ""
+    : process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 /**
  * Generic fetch wrapper with error handling.
@@ -492,9 +510,26 @@ export const imageApi = {
    * exists. Gives up after `timeoutMs` rather than polling forever — a stuck
    * background task shouldn't leave a spinner running indefinitely.
    */
+  /**
+   * Poll an uploaded image until extraction finishes.
+   *
+   * ⚠️  240s, NOT 60s — AND THE DIFFERENCE IS NOT COSMETIC.
+   * Extraction is a vision-model call over a full-page report scan, followed
+   * by a Tesseract pass and an agreement check between the two. On a cold
+   * container, or when the model provider is slow, that exceeds a minute
+   * without anything being wrong.
+   *
+   * The old 60s ceiling produced the worst failure this system can have: the
+   * backend finished successfully and stored the text, the client had already
+   * given up, and the question was answered from the literature instead of
+   * from the document the user attached. No error reached the screen — the
+   * answer was simply about something else, delivered with full confidence.
+   *
+   * A timeout here should mean "genuinely stuck", never "slower than usual".
+   */
   waitForProcessing: async (
     id: string,
-    { intervalMs = 1000, timeoutMs = 60000 } = {}
+    { intervalMs = 1000, timeoutMs = 240000 } = {}
   ): Promise<MedicalImage> => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {

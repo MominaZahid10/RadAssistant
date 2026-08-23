@@ -1,0 +1,63 @@
+# ══════════════════════════════════════════════════════════════
+# RadAssistant — reverse proxy and TLS (ALL ON ONE BOX)
+# ══════════════════════════════════════════════════════════════
+# Caddy terminates HTTPS and routes to the two app containers. It obtains and
+# renews a Let's Encrypt certificate on its own; there is no certbot, no cron
+# job, and nothing to remember in ninety days.
+#
+# ⚠️  THIS IS THE SELF-HOSTED VARIANT. It serves BOTH the API and the Next.js
+# app from this server. Use it when you are not hosting the frontend on
+# Vercel — an on-premise install, or an air-gapped network where an external
+# CDN is not an option.
+#
+# Select it in .env:
+#     CADDYFILE=./Caddyfile.selfhosted
+# and start the frontend container, which is off by default:
+#     docker compose -f docker-compose.prod.yml --profile selfhosted up -d
+#
+# SITE_ADDRESS comes from the environment — see env.prod.example.
+# ══════════════════════════════════════════════════════════════
+
+{$SITE_ADDRESS} {
+
+	# ── The API ───────────────────────────────────────────────
+	# ⚠️  ORDER MATTERS. This block must come before the catch-all
+	# below, or every request including /api/* goes to the frontend.
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			# ⚠️  THE LINE THAT KEEPS STREAMING WORKING.
+			#
+			# The chat endpoint is server-sent events: the backend emits one
+			# token at a time and the UI renders them as they land. A proxy
+			# that buffers turns that into a single response delivered at the
+			# end — the user stares at a blank bubble for fifteen seconds and
+			# then the whole answer appears at once.
+			#
+			# It is not an error. Nothing logs. The app simply stops feeling
+			# like it works, and the cause is a proxy default rather than
+			# anything in the application, which makes it genuinely hard to
+			# find. flush_interval -1 disables buffering entirely.
+			flush_interval -1
+		}
+	}
+
+	# ── Everything else: the Next.js app ──────────────────────
+	handle {
+		# ⚠️  COMPRESSION HERE, NOT ON /api.
+		# gzip over an SSE stream is the other way to reintroduce buffering:
+		# the compressor wants a block to work on and holds tokens back until
+		# it has one. HTML, CSS and JS benefit from it; a token stream does
+		# not.
+		encode gzip
+		reverse_proxy frontend:3000
+	}
+
+	# Keep the access log; on a public instance it is the only way to see
+	# whether anyone is actually using this, or abusing it.
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}

@@ -1,0 +1,51 @@
+# ══════════════════════════════════════════════════════════════
+# RadAssistant — API edge (split hosting)
+# ══════════════════════════════════════════════════════════════
+# This is the SPLIT-HOSTING Caddyfile: the Next.js app lives on Vercel and
+# this server exposes only the API. Caddy terminates HTTPS and obtains its
+# own Let's Encrypt certificate; there is no certbot and nothing expiring in
+# ninety days.
+#
+# For the all-on-one-box deployment, use Caddyfile.selfhosted instead:
+#     CADDYFILE=./Caddyfile.selfhosted   in .env
+#
+# SITE_ADDRESS and APP_URL come from the environment — see env.prod.example.
+# ══════════════════════════════════════════════════════════════
+
+{$SITE_ADDRESS} {
+
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			# ⚠️  THE LINE THAT KEEPS STREAMING WORKING.
+			#
+			# The chat endpoint is server-sent events: the backend emits one
+			# token at a time and the UI renders them as they arrive. A proxy
+			# that buffers turns that into a single response delivered at the
+			# end — the user watches an empty bubble for fifteen seconds and
+			# then the whole answer appears at once.
+			#
+			# It is not an error. Nothing logs. The app simply stops feeling
+			# like it works, and the cause is a proxy default rather than
+			# anything in the application, which makes it genuinely hard to
+			# find. flush_interval -1 disables buffering entirely.
+			flush_interval -1
+		}
+	}
+
+	# ⚠️  NO COMPRESSION ANYWHERE IN THIS FILE.
+	# gzip over an SSE stream reintroduces exactly the buffering the line
+	# above removes: the compressor holds tokens back until it has a block
+	# worth compressing. This server serves only the API, so there is nothing
+	# here that would benefit from it anyway — Vercel compresses the app.
+	handle {
+		# Anyone who reaches the bare hostname wanted the app, not the API.
+		redir {$APP_URL} permanent
+	}
+
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}

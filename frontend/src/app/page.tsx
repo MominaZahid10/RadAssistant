@@ -634,6 +634,7 @@ export default function ChatPage() {
       );
 
       const uploaded: MedicalImage[] = [];
+      const failed: string[] = [];
       for (const att of attachments) {
         try {
           // Treat every attachment as a report photo so its text is
@@ -645,6 +646,7 @@ export default function ChatPage() {
           uploaded.push(await imageApi.waitForProcessing(accepted.id));
         } catch (e) {
           console.error("Attachment failed:", e);
+          failed.push(att.file.name);
         } finally {
           URL.revokeObjectURL(att.previewUrl);
         }
@@ -653,6 +655,46 @@ export default function ChatPage() {
       write((prev) =>
         prev.map((m) => (m.id === userMsgId ? { ...m, images: uploaded } : m))
       );
+
+      // ⚠️  STOP. DO NOT ANSWER A QUESTION ABOUT A DOCUMENT WE FAILED TO READ.
+      //
+      // This block exists because of a real failure. An upload succeeded on
+      // the server and stored 998 characters of extracted text, but the
+      // client's polling timeout fired first. The error was caught, logged to
+      // a console nobody had open, and the send continued with no attachment.
+      // The backend, seeing a bare question, answered "what are the findings
+      // of this report?" from the literature — a fluent, well-cited essay
+      // about radiology reporting conventions, containing nothing whatsoever
+      // from the patient's report.
+      //
+      // Nothing looked broken. That is precisely the problem: for a clinical
+      // tool, an answer about the wrong thing is more dangerous than a
+      // visible error, because the reader has no way to tell.
+      //
+      // Note this fires on a genuine upload/processing FAILURE, not on an
+      // attachment that legitimately contains no text — a plain radiograph
+      // has no OCR output and is still a valid thing to ask about.
+      if (failed.length) {
+        const names = failed.join(", ");
+        write((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? {
+                  ...m,
+                  content:
+                    `I couldn't read ${names}, so I've stopped rather than ` +
+                    `answer without it — an answer drawn from the literature ` +
+                    `instead of your document would look right and be about ` +
+                    `something else. Please try attaching it again.`,
+                  isStreaming: false,
+                  isError: true,
+                }
+              : m
+          )
+        );
+        setIsLoading(false);
+        return;
+      }
 
       // ⚠️  SENT SEPARATELY, NOT CONCATENATED INTO THE QUESTION.
       // Appending the report to the query made the model treat retrieved

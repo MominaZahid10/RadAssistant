@@ -19,13 +19,7 @@
 
 ## Demo
 
-<!-- ══════════════════════════════════════════════════════════
-     ▸
-
 https://github.com/user-attachments/assets/34c50e5f-efaa-4a9e-b69a-4dbb374919f6
-
-
-     ══════════════════════════════════════════════════════════ -->
 
 <sub>Ask a question · read an uploaded report · draft and sign off a structured report · compare against a prior study · watch it decline something outside its corpus.</sub>
 

@@ -19,9 +19,19 @@
 
 ## Demo
 
-https://github.com/user-attachments/assets/34c50e5f-efaa-4a9e-b69a-4dbb374919f6
+<!-- ▸ SHORT GIF GOES HERE. Drag a ~10s .gif in via GitHub's web editor,
+     exactly as you did the video, then delete this comment. -->
 
 <sub>Ask a question · read an uploaded report · draft and sign off a structured report · compare against a prior study · watch it decline something outside its corpus.</sub>
+
+<details>
+<summary><b>▶︎ Full walkthrough (2 min)</b></summary>
+
+<br>
+
+https://github.com/user-attachments/assets/34c50e5f-efaa-4a9e-b69a-4dbb374919f6
+
+</details>
 
 ---
 

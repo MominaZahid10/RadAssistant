@@ -19,8 +19,8 @@
 
 ## Demo
 
-<!-- ▸ SHORT GIF GOES HERE. Drag a ~10s .gif in via GitHub's web editor,
-     exactly as you did the video, then delete this comment. -->
+C:\Users\H\Desktop\RAG\radassistant-demo.gif
+
 
 <sub>Ask a question · read an uploaded report · draft and sign off a structured report · compare against a prior study · watch it decline something outside its corpus.</sub>
 

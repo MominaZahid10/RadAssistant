@@ -19,7 +19,8 @@
 
 ## Demo
 
-C:\Users\H\Desktop\RAG\radassistant-demo.gif
+<img width="832" height="368" alt="radassistant-demo" src="https://github.com/user-attachments/assets/914e5128-4942-42d0-b229-3fe45465859c" />
+
 
 
 <sub>Ask a question · read an uploaded report · draft and sign off a structured report · compare against a prior study · watch it decline something outside its corpus.</sub>

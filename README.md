@@ -20,11 +20,11 @@
 ## Demo
 
 <!-- ══════════════════════════════════════════════════════════
-     ▸ DROP THE VIDEO HERE.
-       Open this file in GitHub's WEB EDITOR and drag the .mp4 in.
-       GitHub hosts it and renders an inline player. A committed
-       .mp4 only renders as a download link and bloats the repo.
-       Delete this comment once the video is in.
+     ▸
+
+https://github.com/user-attachments/assets/34c50e5f-efaa-4a9e-b69a-4dbb374919f6
+
+
      ══════════════════════════════════════════════════════════ -->
 
 <sub>Ask a question · read an uploaded report · draft and sign off a structured report · compare against a prior study · watch it decline something outside its corpus.</sub>
